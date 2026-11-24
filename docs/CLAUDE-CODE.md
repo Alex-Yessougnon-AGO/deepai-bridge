@@ -15,6 +15,16 @@ binaire `claude` à chaque lancement et n'écrit rien dans le dossier
 d'installation. Vérifie quand même avec `deepbridge doctor` — il relance une
 session de test et refuse toute régression.
 
+## Premier lancement dans un dossier
+
+Claude Code demande « Is this a project you created or one you trust? » et
+`Claude Code didn't start because this folder isn't trusted` si on valide, parce
+que le curseur est sur **No, exit** par défaut.
+
+Ce n'est pas le bridge : c'est l'autorisation d'écrire dans le dossier, une fois
+par dossier. Flèche bas puis Entrée. On peut la contourner avec
+`claude --dangerously-skip-permissions`, mais elle ne revient plus ensuite.
+
 ## Ce que `/` doit afficher
 
 `/` liste :
