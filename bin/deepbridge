@@ -82,7 +82,7 @@ Type=simple
 Environment=BRIDGE_STAY_ALIVE=1
 Environment=BRIDGE_PORT=${PORT}
 ExecStart=$(command -v node) ${ROOT}/src/bridge.mjs
-Restart=always
+Restart=on-failure
 RestartSec=5
 
 [Install]
@@ -103,6 +103,20 @@ EOF
       systemctl --user status deepbridge.service --no-pager 2>/dev/null | head -6
       ;;
   esac
+}
+
+cmd_start() {
+  if curl -fsS -m 2 "${URL}/health" >/dev/null 2>&1; then
+    c_ok "bridge déjà actif"
+    return
+  fi
+  mkdir -p "$STATE"
+  ( cd "$ROOT" && BRIDGE_STAY_ALIVE=1 setsid node "$ROOT/src/bridge.mjs" >>"$LOG" 2>&1 </dev/null & )
+  for _ in $(seq 1 40); do
+    curl -fsS -m 1 "${URL}/health" >/dev/null 2>&1 && { c_ok "bridge lancé (il reste jusqu'à 'deepbridge stop')"; return; }
+    sleep 0.25
+  done
+  die "le bridge n'a pas démarré (voir ${LOG})"
 }
 
 cmd_stop() {
@@ -381,6 +395,7 @@ Codex ou n'importe quel client Anthropic/OpenAI.
   run -- cmd  lance un client (agy, codex, opencode…) avec le bridge
   run -- cmd  lance un client avec le bridge (démarré puis arrêté avec lui)
   sync        réécrit la liste des modèles chez opencode et codex
+  start       lance le bridge en arrière-plan, sans expiration
   stop        arrête le bridge
   service     bridge en service permanent (install|uninstall|status)
   serve       lance le bridge au premier plan
@@ -397,6 +412,7 @@ case "${1:-}" in
   account) shift; cmd_account "$@" ;;
   api) shift; cmd_api "$@" ;;
   sync) shift; cmd_sync "$@" ;;
+  start) shift; cmd_start "$@" ;;
   stop) shift; cmd_stop "$@" ;;
   service) shift; cmd_service "$@" ;;
   serve) shift; cmd_serve "$@" ;;

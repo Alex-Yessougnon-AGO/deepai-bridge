@@ -20,6 +20,7 @@
  */
 import http from "node:http";
 import fs from "node:fs";
+import { spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -204,10 +205,46 @@ async function choose(requested) {
   return { entry: fallback, note: `no theos left, using ${fallback?.model}` };
 }
 
+/**
+ * The app holds the transport. Starting it here means no client has to be told
+ * "open DeepAI Code first" — the first request brings it up.
+ */
+let appStarting = false;
+function startApp() {
+  const bin = process.env.DEEPAI_APP_BIN ||
+    `${process.env.HOME || ""}/AppImages/deepai_code.appimage`;
+  if (appStarting || process.env.BRIDGE_AUTOSTART_APP === "0") return;
+  try {
+    if (!fs.existsSync(bin)) return;
+    appStarting = true;
+    log("starting-app", bin);
+    spawn(bin, [], { detached: true, stdio: "ignore" }).unref();
+    setTimeout(() => { appStarting = false; }, 60000).unref();
+  } catch (e) {
+    appStarting = false;
+    log("start-app-error", e.message);
+  }
+}
+
 // ------------------------------------------------------------------ upstream
 async function upstream(payload) {
-  const t = findTransport();
-  if (!t) return { error: { code: 503, message: "DeepAI Code is not running." } };
+  let t = findTransport();
+  if (!t) {
+    startApp();
+    // Electron cold start can take a while on a fresh mount: wait up to 90 s
+    // rather than failing the first request the user makes.
+    for (let i = 0; i < 180 && !t; i++) {
+      await sleep(500);
+      t = findTransport();
+    }
+  }
+  if (!t)
+    return {
+      error: {
+        code: 503,
+        message: "DeepAI Code did not come up; open it once, then retry.",
+      },
+    };
   try {
     const res = await fetch(`${t.url}/chat/completions`, {
       method: "POST",
@@ -857,6 +894,9 @@ const server = http.createServer((req, res) => {
       models: catalogue().length,
       free: freeModels().length,
       allowPaid: ALLOW_PAID,
+      autostartApp: process.env.BRIDGE_AUTOSTART_APP !== "0",
+      idleSeconds: Number(process.env.BRIDGE_IDLE_SECONDS ?? 0),
+      version: 2,
     });
   }
 
@@ -952,7 +992,9 @@ server.listen(PORT, HOST, async () => {
   if (process.env.BRIDGE_STAY_ALIVE !== "1") {
     // Also exit once nobody has talked to us for a while, so several clients
     // can share one bridge without anyone owning its lifetime.
-    const idle = Number(process.env.BRIDGE_IDLE_SECONDS ?? 600) * 1000;
+    // 0 = jamais : le bridge vit jusqu'à `deepbridge stop`, `service uninstall`
+    // ou l'extinction de la machine.
+    const idle = Number(process.env.BRIDGE_IDLE_SECONDS ?? 0) * 1000;
     let last = Date.now();
     server.on("request", () => {
       last = Date.now();
@@ -975,7 +1017,9 @@ server.listen(PORT, HOST, async () => {
         alive = true; // une erreur de lecture n'est pas une disparition
       }
       misses = alive ? 0 : misses + 1;
-      if (misses >= 2) {
+      // 6 passages = ~24 s : un pic de charge ou une app qui redémarre ne doit
+      // pas emporter le bridge.
+      if (misses >= 6) {
         log("transport gone; exiting");
         server.close(() => process.exit(0));
         setTimeout(() => process.exit(0), 1500).unref();

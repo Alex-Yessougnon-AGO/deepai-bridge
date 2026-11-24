@@ -66,6 +66,10 @@ and the bridge stops when you quit.
 
 Check the chain: `deepbridge doctor` · Remove: `deepbridge uninstall`
 
+Nothing stops DeepAI Code but you: the bridge only launches it when no instance
+is running, and never closes it. At rest the bridge spends no theos; only paid
+models you pick explicitly do.
+
 ## Always-on service
 
 To keep the bridge running for good (several clients, long sessions):

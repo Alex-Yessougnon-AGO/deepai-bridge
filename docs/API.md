@@ -55,6 +55,17 @@ Responses et en `reasoning`/`reasoning_details` côté chat.
 
 `BRIDGE_VERBOSE=1` journalise les paramètres retenus, sans le contenu.
 
+## L'app DeepAI Code
+
+Le bridge ne la lance pas « pour rien » : il vérifie d'abord qu'un transport est
+présent. S'il n'y en a aucun et qu'une requête arrive, il démarre l'app et attend
+jusqu'à 90 s. `BRIDGE_AUTOSTART_APP=0` désactive ce démarrage automatique ; il
+faut alors lancer l'app soi-même.
+
+**Rien dans le bridge n'arrête l'app.** Le seul `kill` du code vise le processus
+du bridge. Si tu fermes DeepAI Code, elle reste fermée ; les requêtes répondent
+503 jusqu'à sa réouverture (ou jusqu'au prochain démarrage automatique).
+
 ## Service permanent
 
 Par défaut le bridge vit avec la session et s'arrête après inactivité. Pour
@@ -67,6 +78,11 @@ deepbridge service install
 
 Il redémarre seul, survit à la fermeture de l'app (les requêtes répondent 503 le
 temps qu'elle revienne) et se coupe par `deepbridge service uninstall`.
+
+Il ne consomme aucun théo tant qu'aucune requête n'est faite : le solde mesuré
+reste identique sur une heure de service au repos. Seuls les modèles payants
+choisis explicitement en consomment, et à solde nul le bridge bascule sur un
+modèle gratuit.
 
 ## Lancement
 

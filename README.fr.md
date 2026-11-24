@@ -66,6 +66,10 @@ modèles, et le bridge s'arrête quand tu quittes.
 
 Vérifier la chaîne : `deepbridge doctor` · Désinstaller : `deepbridge uninstall`
 
+Rien n'arrête l'app DeepAI Code à part toi : le bridge ne la lance que si aucune
+instance ne tourne, et ne la ferme jamais. Au repos le pont ne consomme aucun
+théo ; seuls les modèles payants choisis explicitement en coûtent.
+
 ## Service permanent
 
 Pour que le pont tourne toujours (plusieurs clients, longues sessions) :
