@@ -68,6 +68,23 @@ export function findDeadHooks() {
   return pruneHooks(structuredClone(readJson(SETTINGS)));
 }
 
+// Ce qui est déjà autorisé et ne doit plus être demandé. Volontairement limité
+// aux gestes de lecture et aux commandes de développement courantes : une
+// suppression reste soumise à confirmation.
+export const ALLOW = [
+  "Read", "Write", "Edit", "MultiEdit", "Glob", "Grep", "NotebookEdit", "WebFetch",
+  "Bash(git status)", "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)",
+  "Bash(git show:*)", "Bash(git branch:*)", "Bash(git add:*)", "Bash(git commit:*)",
+  "Bash(git stash:*)", "Bash(git checkout:*)", "Bash(git switch:*)", "Bash(git restore:*)",
+  "Bash(ls:*)", "Bash(pwd)", "Bash(cd:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)",
+  "Bash(wc:*)", "Bash(rg:*)", "Bash(grep:*)", "Bash(find:*)", "Bash(tree:*)",
+  "Bash(mkdir:*)", "Bash(touch:*)", "Bash(cp:*)", "Bash(mv:*)", "Bash(sed:*)", "Bash(awk:*)",
+  "Bash(node:*)", "Bash(npm:*)", "Bash(npx:*)", "Bash(pnpm:*)", "Bash(yarn:*)",
+  "Bash(python:*)", "Bash(python3:*)", "Bash(pip:*)", "Bash(uv:*)", "Bash(cargo:*)",
+  "Bash(go:*)", "Bash(make:*)", "Bash(ffmpeg:*)", "Bash(jq:*)", "Bash(curl:*)", "Bash(which:*)",
+  "Bash(echo:*)", "Bash(date:*)", "Bash(du:*)", "Bash(df:*)", "Bash(ps:*)", "Bash(pgrep:*)",
+];
+
 /** Build the settings object the bridge wants, given the user's current one. */
 export function buildSettings(base, { port = 41200, model } = {}) {
   const ids = catalogue().map((m) => m.id);
@@ -95,6 +112,13 @@ export function buildSettings(base, { port = 41200, model } = {}) {
 
   next.model = pick;
   next.availableModels = ids;
+
+  // Moins de demandes à répétition : les gestes ci-dessus passent, le reste
+  // demande encore. Les règles déjà présentes chez l'utilisateur sont gardées.
+  next.permissions = { ...(next.permissions || {}) };
+  if (!next.permissions.defaultMode) next.permissions.defaultMode = "acceptEdits";
+  const existing = Array.isArray(next.permissions.allow) ? next.permissions.allow : [];
+  next.permissions.allow = [...new Set([...existing, ...ALLOW])];
   pruneHooks(next);
   return next;
 }
@@ -112,6 +136,14 @@ export function writeSettings({ port = 41200, model } = {}) {
 export function restoreSettings() {
   const current = readJson(SETTINGS);
   delete current.availableModels;
+  if (current.permissions) {
+    const allow = Array.isArray(current.permissions.allow) ? current.permissions.allow : [];
+    const left = allow.filter((r) => !ALLOW.includes(r));
+    if (left.length) current.permissions.allow = left;
+    else delete current.permissions.allow;
+    if (current.permissions.defaultMode === "acceptEdits") delete current.permissions.defaultMode;
+    if (!Object.keys(current.permissions).length) delete current.permissions;
+  }
   if (current.env) {
     for (const key of Object.keys(current.env)) {
       if (/^ANTHROPIC_(BASE_URL|AUTH_TOKEN|API_KEY|MODEL|DEFAULT_|CUSTOM_MODEL_OPTION)|^CLAUDE_CODE_(ENABLE_GATEWAY_MODEL_DISCOVERY|SUBAGENT_MODEL|MAX_OUTPUT_TOKENS)|^API_TIMEOUT_MS$/.test(key)) delete current.env[key];

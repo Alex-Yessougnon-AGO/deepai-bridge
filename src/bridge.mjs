@@ -884,6 +884,11 @@ async function geminiGenerate(req, res, body, modelId, stream) {
 }
 
 // ------------------------------------------------------------------ routing
+// Ids qu'un client peut reconnaitre sans les connaitre de DeepAI. Le mode auto
+// de Claude Code exige un de ceux-la pour son classificateur ; le bridge les
+// resout vers le modele par defaut.
+const ALIASES = ["claude-3-5-haiku-20241022", "claude-3-5-haiku-latest", "claude-haiku-4-5", "claude-3-5-sonnet-20241022"];
+
 function modelList(origin) {
   const free = new Set(freeModels().map((m) => m.id));
   void free;
@@ -905,6 +910,22 @@ function modelList(origin) {
     })),
     has_more: false,
   };
+}
+
+function withAliases(list) {
+  const known = new Set(list.data.map((m) => m.id));
+  const base = list.data.find((m) => m.id.endsWith(defaultModel())) || list.data[0];
+  for (const id of ALIASES) {
+    if (known.has(id) || !base) continue;
+    list.data.push({
+      ...base,
+      id,
+      display_name: `${base.display_name} (alias ${id})`,
+      description: `alias de ${base.id}`,
+      alias: true,
+    });
+  }
+  return list;
 }
 
 const server = http.createServer((req, res) => {
@@ -931,7 +952,7 @@ const server = http.createServer((req, res) => {
     return send(res, 401, err("Missing or invalid bridge token.", "authentication_error"));
   }
 
-  if (p === "/v1/models" || p === "/models") return send(res, 200, modelList(url.origin));
+  if (p === "/v1/models" || p === "/models") return send(res, 200, withAliases(modelList(url.origin)));
 
   const gm = p.match(/^\/(?:v1beta|v1)\/(models(?:\/[^/:]+)?)(?::(generateContent|streamGenerateContent))?$/);
   if (gm) {

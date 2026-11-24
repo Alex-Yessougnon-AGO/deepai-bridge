@@ -15,6 +15,33 @@ binaire `claude` à chaque lancement et n'écrit rien dans le dossier
 d'installation. Vérifie quand même avec `deepbridge doctor` — il relance une
 session de test et refuse toute régression.
 
+## Permissions : ne plus être interrogé
+
+Claude Code demande confirmation avant d'écrire ou de lancer une commande. Deux
+niveaux, et un piège.
+
+**Le piège : `auto` ne marche pas ici.** Le mode `auto` s'appuie sur un
+classificateur côté serveur Anthropic ; derrière une passerelle, Claude Code
+affiche « auto mode unavailable for this model ». Inutile de le sélectionner.
+
+**Ce qui marche : `acceptEdits`.** C'est le mode par défaut posé par `install` :
+les écritures passent sans demande.
+
+**Et une liste blanche** pour les commandes : `install` écrit 60 règles dans
+`~/.claude/settings.json` (lecture, git, node, npm, python, cargo, ffmpeg, ls,
+cat, mkdir, curl…). `mv`, `cp`, `sed`, `rm` inclus ; une suppression franche
+demande encore, ce qui est sain.
+
+Changer de mode sans le réécrire :
+
+```bash
+claude --permission-mode acceptEdits   # écritures autorisées, commandes filtrées
+claude --permission-mode bypassPermissions   # tout autorisé, aucune demande
+```
+
+`bypassPermissions` est le seul moyen d'obtenir zéro demande partout. À réserver
+aux dépôts de confiance : Claude peut écrire et exécuter sans rien demander.
+
 ## Premier lancement dans un dossier
 
 Claude Code demande « Is this a project you created or one you trust? » et
