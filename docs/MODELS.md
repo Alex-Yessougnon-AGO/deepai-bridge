@@ -27,7 +27,7 @@ D'où deux préfixes, un par classe de prix :
 | Classe | Préfixe | Exemple |
 |---|---|---|
 | gratuit (0 théo) | `claude-3-haiku` | `claude-3-haiku--glm-5.3-flash` |
-| payant | `claude-sonnet-4-5` | `claude-sonnet-4-5--claude-opus-5-5` |
+| payant | `claude-sonnet-4-6` | `claude-sonnet-4-6--claude-opus-5-5` |
 
 Le séparateur est `--` ; le bridge le coupe pour retrouver l'identifiant réel.
 `claude-3-haiku` est réservé au gratuit pour qu'un appel gratuit ne puisse jamais

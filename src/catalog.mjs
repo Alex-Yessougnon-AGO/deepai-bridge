@@ -27,7 +27,7 @@ export const MODELS_FILE = path.join(
 );
 
 export const FREE_ANCHOR = "claude-3-haiku";
-export const PAID_ANCHOR = "claude-sonnet-4-5";
+export const PAID_ANCHOR = "claude-sonnet-4-6";
 const SEP = "--";
 
 /** Bootstrap catalogue, used only when the app catalogue is unreadable. */
