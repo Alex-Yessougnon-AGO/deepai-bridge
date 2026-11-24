@@ -1,0 +1,221 @@
+#!/usr/bin/env bash
+# deepbridge — control surface for the DeepAI Code bridge.
+set -uo pipefail
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
+STATE="${HOME}/.deepai-bridge"
+PORT="${BRIDGE_PORT:-41200}"
+URL="http://127.0.0.1:${PORT}"
+BIN_DIR="${HOME}/.local/bin/deepbridge-bin"
+
+c_ok()   { printf '\033[32m%s\033[0m\n' "$*"; }
+c_warn() { printf '\033[33m%s\033[0m\n' "$*"; }
+c_err()  { printf '\033[31m%s\033[0m\n' "$*" >&2; }
+die()    { c_err "$*"; exit 1; }
+
+token() { cat "${STATE}/token" 2>/dev/null; }
+need_bridge() { curl -fsS -m 2 "${URL}/health" >/dev/null 2>&1 || die "bridge not running (start it, or just run: claude)"; }
+
+cmd_serve() {
+  mkdir -p "$STATE"
+  BRIDGE_STAY_ALIVE=1 exec node "${ROOT}/src/bridge.mjs"
+}
+
+cmd_models() {
+  need_bridge
+  curl -fsS "${URL}/v1/models" -H "authorization: Bearer $(token)" |
+    node -e '
+      let raw = "";
+      process.stdin.on("data", (c) => (raw += c)).on("end", () => {
+        const list = JSON.parse(raw).data;
+        const free = list.filter((m) => m.price.free);
+        const paid = list.filter((m) => !m.price.free);
+        const pad = (s, n) => s + " ".repeat(Math.max(0, n - s.length));
+        console.log(`\n${free.length} gratuits (0 théo) :`);
+        for (const m of free) console.log(`  ${pad(m.id, 46)} ${m.display_name}`);
+        console.log(`\n${paid.length} payants :`);
+        for (const m of paid) console.log(`  ${pad(m.id, 46)} ${m.display_name}`);
+        console.log("");
+      });'
+}
+
+cmd_balance() {
+  need_bridge
+  curl -fsS "${URL}/balance" -H "authorization: Bearer $(token)" | node -e '
+    let raw="";process.stdin.on("data",c=>raw+=c).on("end",()=>{
+      const a=JSON.parse(raw);
+      console.log(`compte        : ${a.username ?? "?"}${a.isPro ? " (pro)" : ""}`);
+      console.log(`solde         : ${a.balance} théos`);
+      console.log(`attribué      : ${a.granted} théos`);
+      console.log(`prochain gain : ${a.refreshAt ?? "?"}`);
+      console.log(`\nLe grant est décidé côté serveur, par machine et par jour.`);
+      console.log(`Rien côté client ne l’augmente : le bridge sert à voir le solde`);
+      console.log(`et à éviter de dépenser des théos par accident.`);
+    });'
+}
+
+cmd_account() {
+  node -e '
+    const fs=require("node:fs"),os=require("node:os"),p=require("node:path");
+    const f=p.join(os.homedir(),".deepai-code/userdata/secrets/deepai-account.bin");
+    try{const a=JSON.parse(fs.readFileSync(f,"utf8"));
+      console.log(`compte connecté : ${a.username}${a.isPro?" (pro)":""}`);
+      console.log(`\nPour changer de compte : ouvre DeepAI Code > compte >`);
+      console.log(`déconnexion, puis reconnecte-toi. Le bridge suit tout seul,`);
+      console.log(`il n’a aucune clé à lui : il lit celle de l’app à chaque requête.`);
+    }catch{console.log("aucun compte connecté dans l’app");}'
+}
+
+cmd_doctor() {
+  local fail=0
+  ok() { c_ok "  ok    $*"; }
+  bad() { c_err "  KO    $*"; fail=1; }
+  click() { curl -fsS -m 2 "$@" 2>/dev/null; }
+
+  echo "Node"; [ -n "$(command -v node)" ] && ok "node $(node -v)" || bad "node absent"
+
+  echo "Binaire Claude Code"
+  local real
+  real="$(printf '%s\n' "${HOME}/.local/share/claude/versions"/* 2>/dev/null | sort -V | tail -n1)"
+  [ -x "$real" ] && ok "réel: $(basename "$real")" || bad "introuvable"
+
+  echo "App DeepAI Code"
+  if click health >/dev/null 2>&1; then ok "bridge répond"; else c_warn "  info  bridge arrêté (normal hors session)"; fi
+  if click health 2>/dev/null | grep -q '"ok":true'; then ok "transport joignable"
+  else c_warn "  info  transport non joignable (l'app démarre avec la session)"; fi
+
+  echo "Compte"
+  [ -n "$(token)" ] && ok "token du bridge présent" || bad "token absent"
+
+  echo "Warning de modèle"
+  if command -v claude >/dev/null && [ -n "$(command -v claude)" ]; then
+    local out
+    out="$(PATH="${ROOT}/shim:$PATH" timeout 90 claude -p 'say OK' 2>&1 | head -3)"
+    if printf '%s' "$out" | grep -q "doesn't recognize the model"; then bad "Claude Code avertit encore"; else ok "aucun avertissement"; fi
+  else bad "claude introuvable dans le PATH"; fi
+
+  echo "Modèles gratuits"
+  local n; n="$(node -e 'import("'"${ROOT}"'/src/catalog.mjs").then(m=>console.log(m.freeModels().length))' 2>/dev/null)"
+  [ "${n:-0}" -gt 0 ] && ok "$n modèles à 0 théo" || bad "aucun modèle gratuit"
+
+  echo
+  [ "$fail" = 0 ] && c_ok "tout est en ordre" || c_err "des points sont à corriger"
+  return "$fail"
+}
+
+cmd_install() {
+  mkdir -p "$BIN_DIR"
+  ln -sf "${ROOT}/shim/claude" "${BIN_DIR}/claude"
+  ln -sf "${ROOT}/bin/deepbridge" "${BIN_DIR}/deepbridge"
+  unset -f claude 2>/dev/null || true
+  local marker="# deepbridge: claude via DeepAI Code"
+  local line="export PATH=\"${BIN_DIR}:\$PATH\"  ${marker}"
+  local touched=0
+  for rc in "${HOME}/.bashrc" "${HOME}/.zshrc" "${HOME}/.config/fish/config.fish"; do
+    [ -e "$rc" ] || continue
+    if grep -q "$marker" "$rc" 2>/dev/null; then continue; fi
+    if [[ "$rc" == *.fish ]]; then
+      printf '\n%s\nset -gx PATH %s $PATH\n' "$marker" "$BIN_DIR" >>"$rc"
+    else
+      printf '\n%s\n' "$line" >>"$rc"
+    fi
+    touched=1
+    c_ok "PATH ajouté dans $rc"
+  done
+  [ "$touched" = 0 ] && c_warn "aucun rc modifié (déjà installé ?)"
+  cat <<EOF
+
+Installé. Ouvre un nouveau terminal, puis lance simplement :
+
+  claude
+
+Le bridge démarre avec la session et s'arrête avec elle.
+Désinstaller : deepbridge uninstall
+EOF
+}
+
+cmd_uninstall() {
+  local marker="# deepbridge: claude via DeepAI Code"
+  for rc in "${HOME}/.bashrc" "${HOME}/.zshrc" "${HOME}/.config/fish/config.fish"; do
+    [ -e "$rc" ] || continue
+    grep -q "$marker" "$rc" 2>/dev/null || continue
+    grep -v "$marker" "$rc" | grep -v "deepbridge-bin" >"$rc.tmp" && mv "$rc.tmp" "$rc"
+    c_ok "nettoyé: $rc"
+  done
+  rm -f "${BIN_DIR}/claude" "${BIN_DIR}/deepbridge"
+  local pid; pid="$(cat "${STATE}/bridge.pid" 2>/dev/null || true)"
+  [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+  c_ok "désinstallé"
+}
+
+cmd_status() {
+  local h
+  h="$(curl -fsS -m 2 "${URL}/health" 2>/dev/null)" || { c_warn "bridge arrêté"; return 0; }
+  printf '%s\n' "$h" | node -e '
+    let r="";process.stdin.on("data",c=>r+=c).on("end",()=>{
+      const h=JSON.parse(r);
+      console.log(`transport : ${h.transport ?? "absent"}`);
+      console.log(`compte    : ${h.account ?? "?"}`);
+      console.log(`modèles   : ${h.models} (${h.free} gratuits)`);
+      console.log(`payants   : ${h.allowPaid ? "autorisés" : "bloqués"}`);
+    });'
+}
+
+cmd_api() {
+  need_bridge
+  cat <<EOF
+Base URL : ${URL}
+Token    : $(token)
+
+Anthropic (Claude Code, ou tout client Anthropic) :
+  ANTHROPIC_BASE_URL=${URL}
+  ANTHROPIC_AUTH_TOKEN=$(token)
+
+OpenAI (opencode, Codex, SDK OpenAI, curl) :
+  OPENAI_BASE_URL=${URL}/v1
+  OPENAI_API_KEY=$(token)
+
+Exemples :
+  curl ${URL}/v1/messages -H "authorization: Bearer $(token)" \\
+    -H 'content-type: application/json' \\
+    -d '{"model":"claude-3-haiku--glm-5.3-flash","max_tokens":200,"messages":[{"role":"user","content":"hi"}]}'
+
+  curl ${URL}/v1/chat/completions -H "authorization: Bearer $(token)" \\
+    -H 'content-type: application/json' \\
+    -d '{"model":"glm-5.3-flash","messages":[{"role":"user","content":"hi"}]}'
+
+Les ids OpenAI acceptent le nom brut (glm-5.3-flash) ou l'id Claude Code.
+EOF
+}
+
+usage() {
+  cat <<EOF
+deepbridge — utilise les modèles de DeepAI Code depuis Claude Code, opencode,
+Codex ou n'importe quel client Anthropic/OpenAI.
+
+  install     active le lanceur claude (bridge démarré/arrêté avec la session)
+  uninstall   retire le lanceur du PATH
+  doctor      vérifie toute la chaîne
+  status      état du bridge
+  models      liste les modèles (gratuits et payants, avec leur prix)
+  balance     solde de théos et prochain gain
+  account     compte DeepAI connecté
+  api         coordonnées + exemples pour brancher un autre client
+  serve       lance le bridge au premier plan
+EOF
+}
+
+case "${1:-}" in
+  install) shift; cmd_install "$@" ;;
+  uninstall) shift; cmd_uninstall "$@" ;;
+  doctor) shift; cmd_doctor "$@" ;;
+  status) shift; cmd_status "$@" ;;
+  models) shift; cmd_models "$@" ;;
+  balance) shift; cmd_balance "$@" ;;
+  account) shift; cmd_account "$@" ;;
+  api) shift; cmd_api "$@" ;;
+  serve) shift; cmd_serve "$@" ;;
+  version|-V|--version) echo "deepbridge 1.0.0" ;;
+  *) usage ;;
+esac

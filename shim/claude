@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+# claude shim: brings the bridge up around a Claude Code session and tears it
+# down when the session ends.
+#
+# - ensures the DeepAI Code app is running (starts it if needed)
+# - starts the bridge, waits until it answers
+# - runs the real Claude Code with a generated settings file that keeps every
+#   user setting (hooks, theme) and adds only the bridge environment
+# - stops the bridge on exit, and leaves the app as it found it
+#
+# Survives Claude Code updates: the real binary is re-resolved on every run and
+# nothing is written inside the Claude Code install directory.
+set -uo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$SELF_DIR/.." && pwd)"
+STATE="${HOME}/.deepai-bridge"
+PORT="${BRIDGE_PORT:-41200}"
+URL="http://127.0.0.1:${PORT}"
+APP_BIN="${DEEPAI_APP_BIN:-${HOME}/AppImages/deepai_code.appimage}"
+USER_SETTINGS="${HOME}/.claude/settings.json"
+GEN_SETTINGS="${STATE}/claude-settings.json"
+PID_FILE="${STATE}/bridge.pid"
+LOG="${STATE}/bridge.log"
+
+mkdir -p "$STATE"
+
+die() { printf 'deepbridge: %s\n' "$1" >&2; exit 1; }
+
+# ---------------------------------------------------------------- real claude
+resolve_claude() {
+  if [[ -n "${CLAUDE_REAL_BIN:-}" && -x "${CLAUDE_REAL_BIN}" ]]; then
+    printf '%s' "$CLAUDE_REAL_BIN"; return
+  fi
+  local dir="${HOME}/.local/share/claude/versions" best=""
+  if [[ -d "$dir" ]]; then
+    best="$(find "$dir" -maxdepth 1 -type f -perm -u+x -printf '%f\n' 2>/dev/null |
+      grep -E '^[0-9]+(\.[0-9]+)+$' | sort -V | tail -n1)"
+    [[ -n "$best" ]] && { printf '%s' "$dir/$best"; return; }
+  fi
+  local found
+  found="$(PATH="$(printf '%s' "$PATH" | tr ':' '\n' | grep -v "^${SELF_DIR}$" | paste -sd:)" command -v claude 2>/dev/null)"
+  [[ -n "$found" ]] && printf '%s' "$found"
+}
+
+CLAUDE_BIN="$(resolve_claude)"
+[[ -n "${CLAUDE_BIN:-}" && -x "${CLAUDE_BIN}" ]] || die "real claude binary not found (set CLAUDE_REAL_BIN)"
+
+# --------------------------------------------------------------- needs bridge
+needs_bridge() {
+  local args=("$@") a
+  for a in "${args[@]}"; do
+    case "$a" in
+      --version|-v|--help|-h|doctor|update|install|mcp|config|auth|setup-token) return 1 ;;
+    esac
+  done
+  return 0
+}
+
+have_transport() {
+  for d in /proc/[0-9]*; do
+    [[ -r "$d/comm" ]] || continue
+    local c; c="$(<"$d/comm")"
+    [[ "$c" == pi* || "$c" == bun ]] || continue
+    tr '\0' '\n' <"$d/environ" 2>/dev/null | grep -q '^T3_DEEPAI_TOKEN=.\+' && return 0
+  done
+  return 1
+}
+
+ensure_app() {
+  have_transport && return 0
+  [[ -x "$APP_BIN" ]] || die "DeepAI Code not running and $APP_BIN missing"
+  printf 'deepbridge: starting DeepAI Code...\n' >&2
+  setsid "$APP_BIN" >>"${STATE}/app.log" 2>&1 < /dev/null &
+  for _ in $(seq 1 60); do have_transport && return 0; sleep 0.5; done
+  die "DeepAI Code did not come up (see ${STATE}/app.log)"
+}
+
+start_bridge() {
+  if curl -fsS -m 2 "${URL}/health" >/dev/null 2>&1; then
+    BRIDGE_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
+    STARTED=0
+    return
+  fi
+  : >"$LOG"
+  ( cd "$ROOT" && setsid node "$ROOT/src/bridge.mjs" >>"$LOG" 2>&1 </dev/null & )
+  for _ in $(seq 1 40); do
+    curl -fsS -m 1 "${URL}/health" >/dev/null 2>&1 && { STARTED=1; BRIDGE_PID="$(cat "$PID_FILE" 2>/dev/null || true)"; return; }
+    sleep 0.25
+  done
+  tail -n 20 "$LOG" >&2
+  die "bridge failed to start"
+}
+
+cleanup() {
+  if [[ "${STARTED:-0}" == "1" && -n "${BRIDGE_PID:-}" ]]; then
+    kill "$BRIDGE_PID" 2>/dev/null || true
+    # Wait briefly so the port is free for the next session.
+    for _ in $(seq 1 20); do
+      curl -fsS -m 1 "${URL}/health" >/dev/null 2>&1 || break
+      sleep 0.1
+    done
+  fi
+}
+trap cleanup EXIT INT TERM
+
+# ------------------------------------------------------------------- settings
+write_settings() {
+  local bridge_token
+  bridge_token="$(cat "${STATE}/token" 2>/dev/null || true)"
+  [[ -n "$bridge_token" ]] || die "bridge token missing"
+
+  node - "$USER_SETTINGS" "$GEN_SETTINGS" "$URL" "$bridge_token" "${BRIDGE_DEFAULT_MODEL:-}" <<'NODE'
+const fs = require("node:fs");
+const [userFile, outFile, url, token, wanted] = process.argv.slice(2);
+
+let base = {};
+try { base = JSON.parse(fs.readFileSync(userFile, "utf8")); } catch {}
+if (Array.isArray(base)) base = {};
+
+const catalog = (() => {
+  try {
+    const list = JSON.parse(fs.readFileSync(`${process.env.HOME}/.deepai-code/userdata/deepai/pi/deepai/models.json`, "utf8"))
+      ?.providers?.deepai?.models ?? [];
+    const free = list.filter((m) => m.theosPerRequest === "0").map((m) => `claude-3-haiku--${m.id}`);
+    return free.length ? free : ["claude-3-haiku--glm-5.3-flash"];
+  } catch { return ["claude-3-haiku--glm-5.3-flash"]; }
+})();
+
+const pick = wanted || catalog[0];
+const env = {
+  ...(base.env || {}),
+  ANTHROPIC_BASE_URL: url,
+  ANTHROPIC_AUTH_TOKEN: token,
+  ANTHROPIC_API_KEY: "",
+  CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: "1",
+  CLAUDE_CODE_MAX_OUTPUT_TOKENS: process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS || "32768",
+  API_TIMEOUT_MS: process.env.API_TIMEOUT_MS || "600000",
+  ANTHROPIC_MODEL: pick,
+  ANTHROPIC_DEFAULT_OPUS_MODEL: pick,
+  ANTHROPIC_DEFAULT_SONNET_MODEL: pick,
+  ANTHROPIC_DEFAULT_HAIKU_MODEL: pick,
+  ANTHROPIC_DEFAULT_FABLE_MODEL: pick,
+  CLAUDE_CODE_SUBAGENT_MODEL: pick,
+  ANTHROPIC_CUSTOM_MODEL_OPTION: pick,
+  ANTHROPIC_CUSTOM_MODEL_OPTION_NAME: "DeepAI Code (bridge)",
+  ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION: "Modèles DeepAI Code, dont les gratuits",
+};
+fs.writeFileSync(outFile, JSON.stringify({ ...base, env, model: pick }, null, 2));
+NODE
+  [[ -s "$GEN_SETTINGS" ]] || die "could not write settings"
+}
+
+if needs_bridge "$@"; then
+  ensure_app
+  start_bridge
+  write_settings
+  # No exec: exec would replace this shell and discard the cleanup trap.
+  "$CLAUDE_BIN" --settings "$GEN_SETTINGS" "$@"
+  status=$?
+  cleanup
+  trap - EXIT
+  exit "$status"
+fi
+
+exec "$CLAUDE_BIN" "$@"

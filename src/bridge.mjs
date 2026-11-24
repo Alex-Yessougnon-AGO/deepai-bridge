@@ -1,0 +1,561 @@
+#!/usr/bin/env node
+/**
+ * DeepAI Code <-> Anthropic / OpenAI bridge.
+ *
+ * Why: DeepAI Code talks to its service with a local OpenAI-compatible transport
+ * owned by the app. Claude Code (and opencode, Codex, anything else) speaks
+ * Anthropic Messages or OpenAI chat completions. This server translates, and
+ * keeps every request going through the app's own transport, so the app stays
+ * the client: same lane headers, same check-in, same machine binding, same
+ * metering.
+ *
+ * Design notes that matter:
+ *  - The transport capability token is per launch and lives in the `pi` child's
+ *    environment. It is re-read on every request, so an app restart is
+ *    transparent and a stale token never sticks.
+ *  - Claude Code emits exactly one message_start per stream. Reasoning deltas are
+ *    therefore buffered out and text is flushed before the first tool call, so
+ *    block indices stay monotonic.
+ *  - The lane rejects a request with no system message: one is always injected.
+ */
+import http from "node:http";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import crypto from "node:crypto";
+
+import { findTransport, sleep } from "./transport.mjs";
+import { catalogue, defaultModel, freeModels, resolveModel } from "./catalog.mjs";
+import { allowance, account } from "./account.mjs";
+
+const PORT = Number(process.env.BRIDGE_PORT || 41200);
+const HOST = "127.0.0.1";
+const STATE = path.join(os.homedir(), ".deepai-bridge");
+const LOG = path.join(STATE, "bridge.log");
+const PID_FILE = path.join(STATE, "bridge.pid");
+const TOKEN_FILE = path.join(STATE, "token");
+const ALLOW_PAID = process.env.BRIDGE_ALLOW_PAID !== "0";
+const FALLBACK_ON_EMPTY = process.env.BRIDGE_FALLBACK_ON_EMPTY !== "0";
+const MAX_OUTPUT = 131072;
+
+// --------------------------------------------------------------------- utils
+function log(...parts) {
+  const line = `[${new Date().toISOString()}] ${parts.join(" ")}`;
+  try {
+    fs.mkdirSync(STATE, { recursive: true });
+    fs.appendFileSync(LOG, line + "\n");
+  } catch {}
+  if (process.env.BRIDGE_VERBOSE) console.error(line);
+}
+
+function token() {
+  try {
+    return fs.readFileSync(TOKEN_FILE, "utf8").trim();
+  } catch {
+    const t = `dbr_${crypto.randomBytes(24).toString("hex")}`;
+    try {
+      fs.mkdirSync(STATE, { recursive: true });
+      fs.writeFileSync(TOKEN_FILE, t, { mode: 0o600 });
+    } catch {}
+    return t;
+  }
+}
+
+const TOKEN = process.env.BRIDGE_TOKEN || token();
+
+function authorised(req) {
+  if (process.env.BRIDGE_NO_AUTH === "1") return true;
+  const auth = req.headers.authorization || "";
+  const bearer = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  const key = req.headers["x-api-key"] || "";
+  const given = String(bearer || key);
+  if (given.length !== TOKEN.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(given), Buffer.from(TOKEN));
+}
+
+const err = (message, type = "api_error") => ({ type: "error", error: { type, message } });
+
+function send(res, code, obj) {
+  if (res.writableEnded) return;
+  const body = Buffer.from(JSON.stringify(obj));
+  res.writeHead(code, { "content-type": "application/json", "content-length": body.length });
+  res.end(body);
+}
+
+// -------------------------------------------------------------- translation
+function textOf(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((p) => p && p.type === "text" && typeof p.text === "string")
+    .map((p) => p.text)
+    .join("\n");
+}
+
+function toParts(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  const parts = [];
+  for (const p of content) {
+    if (p?.type === "text") parts.push({ type: "text", text: p.text });
+    else if (p?.type === "image" && p.source) {
+      const url =
+        p.source.type === "base64" ? `data:${p.source.media_type};base64,${p.source.data}` : p.source.url;
+      if (url) parts.push({ type: "image_url", image_url: { url } });
+    }
+  }
+  if (parts.every((p) => p.type === "text")) return parts.map((p) => p.text).join("\n");
+  return parts;
+}
+
+/** Anthropic Messages request -> OpenAI chat/completions request. */
+function translate(body, model) {
+  const messages = [];
+  const system = Array.isArray(body.system)
+    ? body.system.map((s) => s?.text ?? "").join("\n")
+    : body.system;
+  messages.push({
+    role: "system",
+    content: String(system ?? "").trim() || "You are a helpful coding assistant.",
+  });
+
+  for (const m of body.messages || []) {
+    if (m.role === "assistant") {
+      const calls = (Array.isArray(m.content) ? m.content : [])
+        .filter((b) => b?.type === "tool_use")
+        .map((b) => ({
+          id: b.id,
+          type: "function",
+          function: { name: b.name, arguments: JSON.stringify(b.input ?? {}) },
+        }));
+      messages.push({
+        role: "assistant",
+        content: textOf(m.content),
+        ...(calls.length ? { tool_calls: calls } : {}),
+      });
+      continue;
+    }
+    const results = Array.isArray(m.content) ? m.content.filter((b) => b?.type === "tool_result") : [];
+    if (results.length) {
+      for (const r of results) {
+        messages.push({
+          role: "tool",
+          tool_call_id: r.tool_use_id,
+          content: textOf(r.content) || JSON.stringify(r.content ?? ""),
+        });
+      }
+      const rest = m.content.filter((b) => b?.type === "text").map((b) => b.text).join("\n");
+      if (rest.trim()) messages.push({ role: "user", content: rest });
+      continue;
+    }
+    messages.push({ role: "user", content: toParts(m.content) });
+  }
+
+  const budget = body.thinking?.budget_tokens;
+  const out = {
+    model,
+    messages,
+    stream: true,
+    max_tokens: Math.max(256, Math.min(Number(body.max_tokens) || 32000, MAX_OUTPUT)),
+    reasoning_effort:
+      body.thinking?.type === "enabled" ? (budget > 12000 ? "high" : budget > 4000 ? "medium" : "low") : "none",
+    stream_options: { include_usage: true },
+  };
+
+  const tools = (body.tools || []).filter((t) => t?.name);
+  if (tools.length) {
+    out.tools = tools.map((t) => ({
+      type: "function",
+      function: {
+        name: t.name,
+        description: t.description || "",
+        parameters: t.input_schema || { type: "object", properties: {} },
+      },
+    }));
+    out.tool_choice = body.tool_choice?.type === "auto" ? "auto" : "auto";
+  }
+  if (typeof body.temperature === "number") out.temperature = body.temperature;
+  out.prompt_cache_key = body.metadata?.user_id
+    ? String(body.metadata.user_id).slice(0, 256)
+    : crypto.randomUUID();
+  return out;
+}
+
+const stopReason = (r) => (r === "tool_calls" ? "tool_use" : r === "length" ? "max_tokens" : "end_turn");
+
+/** Resolve the requested model, honouring the paid guard. */
+async function choose(requested) {
+  const wanted = resolveModel(requested);
+  const fallback = resolveModel(process.env.BRIDGE_DEFAULT_MODEL) || resolveModel(defaultModel());
+
+  if (!wanted) {
+    log("model-miss", String(requested).slice(0, 80), "->", fallback?.model);
+    return { entry: fallback, note: `unknown model, using ${fallback?.model}` };
+  }
+  if (wanted.free || ALLOW_PAID) return { entry: wanted };
+  if (!FALLBACK_ON_EMPTY) return { entry: wanted };
+
+  const bal = await allowance();
+  if (bal && bal.balance > 0) return { entry: wanted };
+  log("paid-but-empty", wanted.model, "->", fallback?.model);
+  return { entry: fallback, note: `no theos left, using ${fallback?.model}` };
+}
+
+// ------------------------------------------------------------------ upstream
+async function upstream(payload) {
+  const t = findTransport();
+  if (!t) return { error: { code: 503, message: "DeepAI Code is not running." } };
+  try {
+    const res = await fetch(`${t.url}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${t.token}`,
+        ...(t.thread ? { "x-session-affinity": t.thread } : {}),
+      },
+      body: JSON.stringify(payload),
+    });
+    return { res };
+  } catch (e) {
+    return { error: { code: 502, message: `transport unreachable: ${e.message}` } };
+  }
+}
+
+// --------------------------------------------------------------- Anthropic
+async function messages(req, res, body) {
+  const { entry, note } = await choose(body.model);
+  if (!entry) return send(res, 503, err("No model available in the DeepAI catalogue.", "overloaded_error"));
+  const payload = translate(body, entry.model);
+
+  const { res: up, error } = await upstream(payload);
+  if (error) return send(res, error.code, err(error.message, "overloaded_error"));
+  if (!up.ok) {
+    const text = await up.text().catch(() => "");
+    log("upstream", up.status, entry.model, text.slice(0, 240));
+    let message = text.slice(0, 400);
+    try {
+      message = JSON.parse(text)?.error?.message || message;
+    } catch {}
+    return send(res, up.status, err(message, up.status === 404 ? "not_found_error" : "api_error"));
+  }
+
+  log("anthropic", entry.model, `${payload.messages.length}msg`, `${payload.tools?.length || 0}tool`);
+
+  const mid = `msg_${crypto.randomBytes(12).toString("hex")}`;
+  res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+
+  const write = (event, data) => {
+    if (res.writableEnded) return;
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+
+  write("message_start", {
+    type: "message_start",
+    message: {
+      id: mid,
+      type: "message",
+      role: "assistant",
+      model: entry.id,
+      content: [],
+      stop_reason: null,
+      stop_sequence: null,
+      usage: { input_tokens: 0, output_tokens: 0 },
+      ...(note ? { _bridge_note: note } : {}),
+    },
+  });
+  write("ping", { type: "ping" });
+
+  let textIndex = -1;
+  let next = 0;
+  let buffered = "";
+  const toolBlocks = new Map();
+  let usage = { input_tokens: 0, output_tokens: 0 };
+  let finish = null;
+
+  const flushText = () => {
+    if (textIndex < 0) {
+      textIndex = next++;
+      write("content_block_start", {
+        type: "content_block_start",
+        index: textIndex,
+        content_block: { type: "text", text: "" },
+      });
+    }
+    if (!buffered) return;
+    write("content_block_delta", {
+      type: "content_block_delta",
+      index: textIndex,
+      delta: { type: "text_delta", text: buffered },
+    });
+    buffered = "";
+  };
+
+  const reader = up.body.getReader();
+  const decoder = new TextDecoder();
+  let carry = "";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      carry += decoder.decode(value, { stream: true });
+      const lines = carry.split("\n");
+      carry = lines.pop() || "";
+      for (const line of lines) {
+        if (!line.startsWith("data:")) continue;
+        const raw = line.slice(5).trim();
+        if (!raw || raw === "[DONE]") continue;
+        let chunk;
+        try {
+          chunk = JSON.parse(raw);
+        } catch {
+          continue;
+        }
+        if (chunk.usage) {
+          usage = {
+            input_tokens: chunk.usage.prompt_tokens ?? usage.input_tokens,
+            output_tokens: chunk.usage.completion_tokens ?? usage.output_tokens,
+          };
+        }
+        const choice = chunk.choices?.[0];
+        if (!choice) continue;
+        const delta = choice.delta || {};
+        if (typeof delta.reasoning === "string" && delta.reasoning) continue; // reasoning is dropped on purpose
+        if (typeof delta.content === "string" && delta.content) {
+          if (textIndex < 0) {
+            textIndex = next++;
+            write("content_block_start", {
+              type: "content_block_start",
+              index: textIndex,
+              content_block: { type: "text", text: "" },
+            });
+          }
+          buffered += delta.content;
+        }
+        for (const call of delta.tool_calls || []) {
+          const slot = call.index ?? 0;
+          let block = toolBlocks.get(slot);
+          if (block) {
+            if (call.function?.arguments)
+              write("content_block_delta", {
+                type: "content_block_delta",
+                index: block.index,
+                delta: { type: "input_json_delta", partial_json: call.function.arguments },
+              });
+            continue;
+          }
+          if (textIndex >= 0) {
+            flushText();
+            write("content_block_stop", { type: "content_block_stop", index: textIndex });
+            textIndex = -1;
+          }
+          block = {
+            index: next++,
+            id: call.id || `toolu_${crypto.randomBytes(8).toString("hex")}`,
+            name: call.function?.name || "",
+          };
+          toolBlocks.set(slot, block);
+          write("content_block_start", {
+            type: "content_block_start",
+            index: block.index,
+            content_block: { type: "tool_use", id: block.id, name: block.name, input: {} },
+          });
+          if (call.function?.arguments)
+            write("content_block_delta", {
+              type: "content_block_delta",
+              index: block.index,
+              delta: { type: "input_json_delta", partial_json: call.function.arguments },
+            });
+        }
+        if (choice.finish_reason) finish = choice.finish_reason;
+      }
+    }
+  } catch (e) {
+    log("stream-error", e.message);
+  }
+
+  if (buffered || textIndex >= 0) {
+    flushText();
+    if (textIndex >= 0) write("content_block_stop", { type: "content_block_stop", index: textIndex });
+  }
+  for (const block of toolBlocks.values())
+    write("content_block_stop", { type: "content_block_stop", index: block.index });
+
+  write("message_delta", {
+    type: "message_delta",
+    delta: { stop_reason: stopReason(finish), stop_sequence: null },
+    usage,
+  });
+  write("message_stop", { type: "message_stop" });
+  if (!res.writableEnded) res.end();
+}
+
+// ------------------------------------------------------------------- OpenAI
+async function chatCompletions(req, res, body) {
+  const { entry } = await choose(body.model);
+  if (!entry) return send(res, 503, err("No model available.", "overloaded_error"));
+
+  const payload = { ...body, model: entry.model };
+  if (Array.isArray(payload.messages) && !payload.messages.some((m) => m.role === "system")) {
+    payload.messages = [{ role: "system", content: "You are a helpful coding assistant." }, ...payload.messages];
+  }
+  payload.stream = Boolean(body.stream);
+  if (payload.stream) payload.stream_options = { include_usage: true };
+
+  log("openai", entry.model, `${payload.messages?.length || 0}msg`, payload.stream ? "stream" : "once");
+
+  const { res: up, error } = await upstream(payload);
+  if (error) return send(res, error.code, err(error.message));
+  if (!up.ok) {
+    const text = await up.text().catch(() => "");
+    return send(res, up.status, JSON.parse(text || "{}") ?? err(text));
+  }
+
+  if (!payload.stream) {
+    const data = await up.json();
+    if (data.model) data.model = entry.id;
+    return send(res, 200, data);
+  }
+
+  res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+  const reader = up.body.getReader();
+  const decoder = new TextDecoder();
+  let carry = "";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      carry += decoder.decode(value, { stream: true });
+      const lines = carry.split("\n");
+      carry = lines.pop() || "";
+      for (const line of lines) {
+        if (!line.startsWith("data:")) {
+          if (line.trim()) res.write(line + "\n");
+          continue;
+        }
+        const raw = line.slice(5).trim();
+        if (raw && raw !== "[DONE]") {
+          try {
+            const chunk = JSON.parse(raw);
+            if (chunk.model) chunk.model = entry.id;
+            res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+            continue;
+          } catch {}
+        }
+        res.write(line + "\n\n");
+      }
+    }
+  } catch (e) {
+    log("openai-stream-error", e.message);
+  }
+  if (!res.writableEnded) res.end();
+}
+
+// ------------------------------------------------------------------ routing
+function modelList(origin) {
+  const free = new Set(freeModels().map((m) => m.id));
+  void free;
+  return {
+    object: "list",
+    data: catalogue().map((m) => ({
+      id: m.id,
+      object: "model",
+      type: "model",
+      display_name: m.label,
+      description: `${m.model} \u2014 ${m.free ? "gratuit (0 th\u00e9o)" : `${m.theos} th\u00e9os`} \u2014 ${m.contextWindow} ctx`,
+      owned_by: "deepai",
+      // Anthropic-shaped extras so both clients can reason about the model
+      context_window: m.contextWindow,
+      max_output_tokens: Math.min(m.maxTokens, MAX_OUTPUT),
+      capabilities: { tool_calling: true, reasoning: true, thinking: true },
+      price: { theos_per_request: Number(m.theos), free: m.free },
+      origin,
+    })),
+    has_more: false,
+  };
+}
+
+const server = http.createServer((req, res) => {
+  const url = new URL(req.url || "/", `http://${HOST}:${PORT}`);
+  const p = url.pathname.replace(/\/+$/, "") || "/";
+
+  if (p === "/" || p === "/health") {
+    const t = findTransport();
+    return send(res, 200, {
+      ok: Boolean(t),
+      transport: t?.url || null,
+      pid: t?.pid || null,
+      account: account()?.username ?? null,
+      models: catalogue().length,
+      free: freeModels().length,
+      allowPaid: ALLOW_PAID,
+    });
+  }
+
+  if (!authorised(req) && p !== "/" && p !== "/health") {
+    return send(res, 401, err("Missing or invalid bridge token.", "authentication_error"));
+  }
+
+  if (p === "/v1/models" || p === "/models") return send(res, 200, modelList(url.origin));
+
+  if (p === "/balance" || p === "/v1/balance") {
+    return allowance({ refresh: url.searchParams.get("refresh") === "1" }).then(
+      (a) => send(res, a ? 200 : 503, a ?? err("Allowance unavailable.", "overloaded_error")),
+      (e) => send(res, 500, err(e.message))
+    );
+  }
+
+  const isMessages = p === "/v1/messages" || p === "/messages";
+  const isChat = p === "/v1/chat/completions" || p === "/chat/completions";
+  if (!isMessages && !isChat) return send(res, 404, err(`Unsupported path ${p}`, "not_found_error"));
+
+  const chunks = [];
+  let size = 0;
+  req.on("data", (c) => {
+    size += c.length;
+    if (size > 64 * 1024 * 1024) {
+      req.destroy();
+      return;
+    }
+    chunks.push(c);
+  });
+  req.on("end", () => {
+    let body;
+    try {
+      body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    } catch {
+      return send(res, 400, err("Invalid JSON body.", "invalid_request_error"));
+    }
+    const run = isMessages ? messages : chatCompletions;
+    run(req, res, body).catch((e) => {
+      log("handler", e.message);
+      if (!res.headersSent) send(res, 500, err(e.message));
+      else if (!res.writableEnded) res.end();
+    });
+  });
+});
+
+// -------------------------------------------------------------------- boot
+server.listen(PORT, HOST, async () => {
+  fs.mkdirSync(STATE, { recursive: true });
+  fs.writeFileSync(PID_FILE, String(process.pid));
+  log(`listening ${HOST}:${PORT} models=${catalogue().length} free=${freeModels().length} allowPaid=${ALLOW_PAID}`);
+  if (process.env.BRIDGE_VERBOSE) {
+    console.error(`bridge on http://${HOST}:${PORT}`);
+    console.error(`token: ${TOKEN}`);
+  }
+  // Follow the app: exit when its transport disappears.
+  if (process.env.BRIDGE_STAY_ALIVE !== "1") {
+    setInterval(() => {
+      if (!findTransport()) {
+        log("transport gone; exiting");
+        server.close(() => process.exit(0));
+        setTimeout(() => process.exit(0), 1500).unref();
+      }
+    }, 4000).unref();
+  }
+});
+
+for (const sig of ["SIGTERM", "SIGINT"]) process.on(sig, () => process.exit(0));
+process.on("unhandledRejection", (e) => log("unhandled", String(e)));
+
+void sleep;
