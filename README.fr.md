@@ -128,6 +128,13 @@ curl http://127.0.0.1:41200/v1/chat/completions \
   -d '{"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}]}'
 ```
 
+## Antigravity
+
+`deepbridge run -- agy --model deepseek -p "..."` : le bridge exporte les
+variables attendues par `agy`. Pour l'IDE, ajoute le modèle dans Settings →
+Models & Usage, URL `http://127.0.0.1:41200/v1/chat/completions`. Détails dans
+[docs/API.md](docs/API.md#antigravity-cli-agy).
+
 ## Changer de compte
 
 Le bridge n'a aucune clé à lui : il relit celle de l'app à chaque requête.

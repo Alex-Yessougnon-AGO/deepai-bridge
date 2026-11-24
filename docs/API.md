@@ -154,6 +154,68 @@ Si un client ne propose que « Azure OpenAI », « Ollama » ou « compatible Op
 prends cette entrée : ce sont les mêmes champs. Côté Anthropic, Bedrock et Vertex
 ne conviennent pas — le bridge parle l'API Messages publique.
 
+## Antigravity CLI (`agy`)
+
+Antigravity reaches custom models through the Gemini API, which the bridge also
+serves. Use `deepbridge run`, which exports the two variables for you:
+
+```bash
+deepbridge run -- agy --model deepseek -p "explique ce fichier"
+```
+
+By hand: `GOOGLE_GEMINI_BASE_URL` is the **root** URL without `/v1beta`
+(the CLI appends it), and the key goes in `GEMINI_API_KEY`.
+
+```bash
+export GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:41200
+export GEMINI_API_KEY="$(cat ~/.deepai-bridge/token)"
+```
+
+`~/.gemini/antigravity-cli/settings.json`:
+
+```json
+{
+  "modelProvider": "gemini",
+  "model": "deepseek",
+  "customModelsConfig": {
+    "customModels": {
+      "deepseek": { "apiProvider": "openai", "label": "DeepSeek (gratuit)", "modelName": "gemini-api://deepseek-v4.1-flash" }
+    }
+  }
+}
+```
+
+`modelName` is `gemini-api://` followed by the **bare** model id. Without
+`--model deepseek`, the CLI asks for `gemini-3.1-pro-preview`; the bridge maps
+any unknown id to the default model, so it still works.
+
+## Antigravity IDE
+
+Settings → **Models & Usage** → **Custom Models** → **Add model**, provider
+*OpenAI compatible*, then:
+
+| Champ | Valeur |
+|---|---|
+| URL | `http://127.0.0.1:41200/v1/chat/completions` |
+| Clé | `cat ~/.deepai-bridge/token` |
+| Modèle | `deepseek-v4.1-flash` |
+
+Test the connection, save, then pick the model in the chat picker. The IDE holds
+a token copy: `deepbridge install` does not rewrite it, so regenerate the token
+(`rm ~/.deepai-bridge/token`) and paste it again if you ever rotate it.
+
+## Gemini API
+
+The Gemini dialect exists for Antigravity and anything else that speaks it:
+
+```
+GET  /v1beta/models
+POST /v1beta/models/<id>:generateContent
+POST /v1beta/models/<id>:streamGenerateContent?alt=sse
+```
+
+Auth by `x-goog-api-key` or `?key=`. Unknown model ids fall back to the default.
+
 ## Anything else
 
 Anything with a **custom base URL** setting works: Continue, Cline, Roo Code,

@@ -67,7 +67,7 @@ function authorised(req) {
   if (process.env.BRIDGE_NO_AUTH === "1") return true;
   const auth = req.headers.authorization || "";
   const bearer = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-  const key = req.headers["x-api-key"] || "";
+  const key = req.headers["x-api-key"] || req.headers["x-goog-api-key"] || "";
   const given = String(bearer || key);
   if (given.length !== TOKEN.length) return false;
   return crypto.timingSafeEqual(Buffer.from(given), Buffer.from(TOKEN));
@@ -554,10 +554,28 @@ async function responsesApi(req, res, body) {
     if (!res.writableEnded) res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
   };
   emit("response.created", { response: responsesShape(id, entry.id, "", null, "in_progress") });
-  emit("response.output_item.added", {
-    output_index: 0,
-    item: { type: "message", id: `${id}_msg`, status: "in_progress", role: "assistant", content: [] },
-  });
+  // Items are announced lazily so the reasoning item, when there is one, keeps
+  // index 0 and the message follows it.
+  let reasoningIndex = null;
+  let textIndex = null;
+  const openItem = (kind) => {
+    if (kind === "reasoning") {
+      if (reasoningIndex !== null) return reasoningIndex;
+      reasoningIndex = reasoningIndex === null ? 0 : reasoningIndex;
+      emit("response.output_item.added", {
+        output_index: reasoningIndex,
+        item: { type: "reasoning", id: `${id}_rs`, summary: [] },
+      });
+      return reasoningIndex;
+    }
+    if (textIndex !== null) return textIndex;
+    textIndex = reasoningIndex === null ? 0 : 1;
+    emit("response.output_item.added", {
+      output_index: textIndex,
+      item: { type: "message", id: `${id}_msg`, status: "in_progress", role: "assistant", content: [] },
+    });
+    return textIndex;
+  };
 
   const reader = up.body.getReader();
   const decoder = new TextDecoder();
@@ -565,6 +583,7 @@ async function responsesApi(req, res, body) {
   let text = "";
   let usage = null;
   let index = 0;
+  let finish = null;
   const calls = [];
   try {
     for (;;) {
@@ -584,6 +603,17 @@ async function responsesApi(req, res, body) {
           continue;
         }
         if (chunk.usage) usage = chunk.usage;
+        const fin = chunk.choices?.[0]?.finish_reason;
+        if (fin) finish = fin;
+        const thinking = chunk.choices?.[0]?.delta?.reasoning;
+        if (thinking) {
+          emit("response.reasoning_summary_text.delta", {
+            item_id: `${id}_rs`,
+            output_index: openItem("reasoning"),
+            summary_index: 0,
+            delta: thinking,
+          });
+        }
         for (const call of chunk.choices?.[0]?.delta?.tool_calls || []) {
           const slot = (calls[call.index ?? 0] ||= { id: call.id, name: "", args: "" });
           if (call.id) slot.id = call.id;
@@ -593,7 +623,12 @@ async function responsesApi(req, res, body) {
         const delta = chunk.choices?.[0]?.delta?.content;
         if (delta) {
           text += delta;
-          emit("response.output_text.delta", { item_id: `${id}_msg`, output_index: 0, content_index: 0, delta });
+          emit("response.output_text.delta", {
+            item_id: `${id}_msg`,
+            output_index: openItem("text"),
+            content_index: 0,
+            delta,
+          });
           index++;
         }
       }
@@ -601,9 +636,30 @@ async function responsesApi(req, res, body) {
   } catch (e) {
     log("responses-stream-error", e.message);
   }
-  if (text) emit("response.output_text.done", { item_id: `${id}_msg`, output_index: 0, content_index: 0, text });
+  if (text) {
+    const ti = textIndex ?? 0;
+    emit("response.output_text.done", { item_id: `${id}_msg`, output_index: ti, content_index: 0, text });
+    emit("response.output_item.done", {
+      output_index: ti,
+      item: {
+        type: "message",
+        id: `${id}_msg`,
+        status: "completed",
+        role: "assistant",
+        content: [{ type: "output_text", text, annotations: [] }],
+      },
+    });
+  }
+  if (reasoningIndex !== null) {
+    emit("response.output_item.done", {
+      output_index: reasoningIndex,
+      item: { type: "reasoning", id: `${id}_rs`, summary: [{ type: "summary_text", text: "" }] },
+    });
+  }
 
-  const shape = responsesShape(id, entry.id, text, usage);
+  const truncated = finish === "length";
+  const shape = responsesShape(id, entry.id, text, usage, truncated ? "incomplete" : "completed");
+  if (truncated) shape.incomplete_details = { reason: "max_output_tokens" };
   calls.forEach((call, i) => {
     const callId = `${id}_call${i}`;
     const item = { type: "function_call", id: callId, call_id: call.id || callId, name: call.name, arguments: "" };
@@ -616,6 +672,122 @@ async function responsesApi(req, res, body) {
   emit("response.completed", { response: shape });
   if (!res.writableEnded) res.end();
   void index;
+}
+
+// --------------------------------------------------------------------- gemini
+// Antigravity (IDE and `agy`) reaches custom models through the Gemini API
+// shape. Translated onto the chat lane like the other two dialects.
+function geminiRequest(body) {
+  const text = (parts) => (parts || []).map((p) => p?.text ?? "").join("");
+  const messages = [];
+  const sys = body.systemInstruction || body.system_instruction;
+  if (sys) messages.push({ role: "system", content: text(sys.parts) });
+  for (const c of body.contents || []) {
+    const role = c.role === "model" ? "assistant" : c.role === "system" ? "system" : "user";
+    const content = text(c.parts);
+    if (content) messages.push({ role, content });
+  }
+  if (!messages.some((m) => m.role === "system"))
+    messages.unshift({ role: "system", content: "You are a helpful coding assistant." });
+
+  const payload = { model: null, messages, stream: false };
+  const gen = body.generationConfig || body.generation_config || {};
+  if (gen.maxOutputTokens || gen.max_output_tokens)
+    payload.max_tokens = Math.min(gen.maxOutputTokens || gen.max_output_tokens, MAX_OUTPUT);
+  if (gen.temperature !== undefined) payload.temperature = gen.temperature;
+
+  const decls = (body.tools || []).flatMap((t) => t.functionDeclarations || t.function_declarations || []);
+  if (decls.length)
+    payload.tools = decls.map((d) => ({
+      type: "function",
+      function: { name: d.name, description: d.description, parameters: d.parameters },
+    }));
+  return payload;
+}
+
+function geminiShape(model, text, finish, usage) {
+  return {
+    candidates: [
+      {
+        content: { role: "model", parts: text ? [{ text }] : [] },
+        finishReason: finish === "length" ? "MAX_TOKENS" : "STOP",
+        index: 0,
+      },
+    ],
+    usageMetadata: {
+      promptTokenCount: usage?.prompt_tokens ?? 0,
+      candidatesTokenCount: usage?.completion_tokens ?? 0,
+      totalTokenCount: usage?.total_tokens ?? 0,
+    },
+    modelVersion: model,
+  };
+}
+
+async function geminiGenerate(req, res, body, modelId, stream) {
+  const { entry } = await choose(modelId);
+  if (!entry) return send(res, 503, err("No model available.", "overloaded_error"));
+
+  const payload = geminiRequest(body);
+  payload.model = entry.model;
+  payload.stream = stream;
+  log("gemini", entry.model, `${payload.messages.length}msg`, stream ? "stream" : "once");
+
+  const { res: up, error } = await upstream(payload);
+  if (error) return send(res, error.code, err(error.message));
+  if (!up.ok) {
+    const text = await up.text().catch(() => "");
+    return send(res, up.status, JSON.parse(text || "{}") ?? err(text));
+  }
+
+  if (!stream) {
+    const data = await up.json();
+    const msg = data.choices?.[0]?.message || {};
+    return send(res, 200, geminiShape(entry.id, msg.content || "", data.choices?.[0]?.finish_reason, data.usage));
+  }
+
+  res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+  const reader = up.body.getReader();
+  const decoder = new TextDecoder();
+  let carry = "";
+  let finish = null;
+  let text = "";
+  let usage = null;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      carry += decoder.decode(value, { stream: true });
+      const lines = carry.split("\n");
+      carry = lines.pop() || "";
+      for (const line of lines) {
+        if (!line.startsWith("data:")) continue;
+        const raw = line.slice(5).trim();
+        if (!raw || raw === "[DONE]") continue;
+        let chunk;
+        try {
+          chunk = JSON.parse(raw);
+        } catch {
+          continue;
+        }
+        if (chunk.usage) usage = chunk.usage;
+        const fin = chunk.choices?.[0]?.finish_reason;
+        if (fin) finish = fin;
+        const delta = chunk.choices?.[0]?.delta?.content;
+        if (delta) {
+          text += delta;
+          if (!res.writableEnded)
+            res.write(`data: ${JSON.stringify(geminiShape(entry.id, delta, null, null))}\n\n`);
+        }
+      }
+    }
+  } catch (e) {
+    log("gemini-stream-error", e.message);
+  }
+  if (!res.writableEnded) {
+    res.write(`data: ${JSON.stringify(geminiShape(entry.id, "", finish, usage))}\n\n`);
+    res.end();
+  }
+  void text;
 }
 
 // ------------------------------------------------------------------ routing
@@ -659,11 +831,27 @@ const server = http.createServer((req, res) => {
     });
   }
 
-  if (!authorised(req) && p !== "/" && p !== "/health") {
+  if (!authorised(req) && !url.searchParams.get("key") && p !== "/" && p !== "/health") {
     return send(res, 401, err("Missing or invalid bridge token.", "authentication_error"));
   }
 
   if (p === "/v1/models" || p === "/models") return send(res, 200, modelList(url.origin));
+
+  const gm = p.match(/^\/(?:v1beta|v1)\/(models(?:\/[^/:]+)?)(?::(generateContent|streamGenerateContent))?$/);
+  if (gm) {
+    const name = gm[1] === "models" ? null : gm[1].slice(7);
+    if (!gm[2]) {
+      const data = catalogue().map((m) => ({
+        name: `models/${m.id}`,
+        displayName: m.label,
+        description: m.model,
+        inputTokenLimit: m.contextWindow,
+        outputTokenLimit: Math.min(m.maxTokens, MAX_OUTPUT),
+        supportedGenerationMethods: ["generateContent", "streamGenerateContent"],
+      }));
+      return send(res, 200, { models: name ? data.filter((x) => x.name === `models/${name}`) : data });
+    }
+  }
 
   if (p === "/balance" || p === "/v1/balance") {
     return allowance({ refresh: url.searchParams.get("refresh") === "1" }).then(
@@ -672,10 +860,12 @@ const server = http.createServer((req, res) => {
     );
   }
 
+  const isGemini = Boolean(gm && gm[2]);
   const isMessages = p === "/v1/messages" || p === "/messages";
   const isChat = p === "/v1/chat/completions" || p === "/chat/completions";
   const isResponses = p === "/v1/responses" || p === "/responses";
-  if (!isMessages && !isChat && !isResponses) return send(res, 404, err(`Unsupported path ${p}`, "not_found_error"));
+  if (!isMessages && !isChat && !isResponses && !isGemini)
+    return send(res, 404, err(`Unsupported path ${p}`, "not_found_error"));
 
   const chunks = [];
   let size = 0;
@@ -694,7 +884,13 @@ const server = http.createServer((req, res) => {
     } catch {
       return send(res, 400, err("Invalid JSON body.", "invalid_request_error"));
     }
-    const run = isMessages ? messages : isResponses ? responsesApi : chatCompletions;
+    const run = isGemini
+      ? (rq, rs, b) => geminiGenerate(rq, rs, b, gm[1].slice(7), gm[2] === "streamGenerateContent")
+      : isMessages
+        ? messages
+        : isResponses
+          ? responsesApi
+          : chatCompletions;
     run(req, res, body).catch((e) => {
       log("handler", e.message);
       if (!res.headersSent) send(res, 500, err(e.message));
