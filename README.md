@@ -1,5 +1,8 @@
 # deepai-bridge
 
+> Unofficial. Not affiliated with or endorsed by DeepAI. Runs against the
+local app you have installed; no service is re-sold or shared.
+
 **English** · [Français](README.fr.md) · [Español](README.es.md) · [Deutsch](README.de.md)
 
 Use **DeepAI Code** models from **Claude Code**, **opencode**, **Codex** or any

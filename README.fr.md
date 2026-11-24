@@ -1,5 +1,8 @@
 # deepai-bridge
 
+> Non officiel. Sans affiliation ni approbation de DeepAI. Fonctionne avec
+l'application locale que tu as installée ; aucun service n'est revendu ni partagé.
+
 [English](README.md) · **Français** · [Español](README.es.md) · [Deutsch](README.de.md)
 
 Utiliser les modèles de **DeepAI Code** depuis **Claude Code**, **opencode**,

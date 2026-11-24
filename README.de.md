@@ -1,5 +1,8 @@
 # deepai-bridge
 
+> Inoffiziell. Keine Verbindung zu DeepAI, keine Billigung. Läuft gegen die
+lokal installierte App; kein Dienst wird weiterverkauft oder geteilt.
+
 [English](README.md) · [Français](README.fr.md) · [Español](README.es.md) · **Deutsch**
 
 Nutze Modelle von **DeepAI Code** aus **Claude Code**, **opencode**, **Codex**
