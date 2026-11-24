@@ -161,6 +161,7 @@ nul, le bridge bascule seul sur un modèle gratuit, sauf si
 - [docs/MODELS.md](docs/MODELS.md) — nommage et suppression du warning
 - [docs/THEOS.md](docs/THEOS.md) — attribution des théos
 - [docs/PLATFORMS.md](docs/PLATFORMS.md) — Linux, macOS, Windows, Docker
+- [docs/CLAUDE-CODE.md](docs/CLAUDE-CODE.md) — entretien de Claude Code et pratiques
 
 ## Note légale
 

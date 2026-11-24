@@ -156,6 +156,7 @@ hits zero the bridge falls back to a free model by itself, unless
 - [docs/MODELS.md](docs/MODELS.md) — model naming and warning suppression
 - [docs/THEOS.md](docs/THEOS.md) — how theos are granted
 - [docs/PLATFORMS.md](docs/PLATFORMS.md) — Linux, macOS, Windows, Docker
+- [docs/CLAUDE-CODE.md](docs/CLAUDE-CODE.md) — Claude Code upkeep and practices
 
 ## Legal note
 
