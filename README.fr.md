@@ -66,6 +66,13 @@ modèles, et le bridge s'arrête quand tu quittes.
 
 Vérifier la chaîne : `deepbridge doctor` · Désinstaller : `deepbridge uninstall`
 
+## Lancer un client
+
+Les lanceurs sont posés par `install` : lance `claude`, `opencode`, `codex` ou
+`agy` normalement, le bridge suit. Un second client réutilise le bridge en cours
+sans le couper ; il s'arrête seul après dix minutes sans trafic (`deepbridge stop`
+pour couper tout de suite).
+
 ## Commandes
 
 | Commande | Effet |

@@ -36,6 +36,21 @@ schema allows:
 `GET /v1/models` returns both, plus `price.theos_per_request` and
 `price.free`.
 
+## Lancement
+
+`deepbridge install` place un lanceur pour chaque client détecté (`claude`,
+`opencode`, `codex`, `agy`, `antigravity`) devant le vrai binaire. Tu lances le
+client normalement : le lanceur démarre l'app si besoin et le bridge, exporte les
+variables attendues, puis passe la main.
+
+Plusieurs clients cohabitent : un lanceur qui trouve un bridge déjà vivant n'en
+démarre pas un second et ne le coupe pas en sortant. Le bridge s'arrête seul
+après `BRIDGE_IDLE_SECONDS` sans trafic (600 par défaut), ou quand l'app se
+ferme. Pour un arrêt immédiat : `deepbridge stop`.
+
+Sans lanceur (shell ancien, script, cron), `deepbridge run -- <client>` fait la
+même chose.
+
 ## Claude Code
 
 Covered by `deepbridge install`: it writes `ANTHROPIC_BASE_URL`,
@@ -43,6 +58,10 @@ Covered by `deepbridge install`: it writes `ANTHROPIC_BASE_URL`,
 into `~/.claude/settings.json`, so `/model` shows only DeepAI Code models.
 
 ## Codex
+
+Le sélecteur `/model` de Codex n'interroge pas `/v1/models` : il n'affiche que
+ses modèles intégrés. Nos modèles se choisissent par `--model`, ou en changeant
+`model` dans `~/.codex/config.toml`. `codex doctor` confirme le fournisseur actif.
 
 `~/.codex/config.toml`:
 

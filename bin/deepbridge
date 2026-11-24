@@ -59,6 +59,20 @@ cmd_run() {
   return $st
 }
 
+cmd_sync() {
+  node "${ROOT}/src/clients.mjs" opencode >/dev/null && c_ok "opencode : catalogue complet écrit"
+  node "${ROOT}/src/clients.mjs" codex >/dev/null 2>&1 || true
+}
+
+cmd_stop() {
+  local pid; pid="$(cat "${STATE}/bridge.pid" 2>/dev/null || true)"
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" && c_ok "bridge arrêté"
+  else
+    c_warn "aucun bridge en cours"
+  fi
+}
+
 cmd_serve() {
   mkdir -p "$STATE"
   BRIDGE_STAY_ALIVE=1 exec node "${ROOT}/src/bridge.mjs"
@@ -152,6 +166,16 @@ cmd_install() {
   ln -sf "${ROOT}/bin/deepbridge" "${BIN_DIR}/deepbridge"
   unset -f claude 2>/dev/null || true
 
+  # Lanceurs pour les autres clients : ils démarrent le bridge si besoin et le
+  # laissent vivre tant qu'un autre client l'utilise.
+  local client real
+  for client in opencode codex agy antigravity; do
+    real="$(PATH="$(printf '%s' "$PATH" | tr ':' '\n' | grep -v "^${BIN_DIR}$" | paste -sd:)" command -v "$client" 2>/dev/null)"
+    [ -n "$real" ] || continue
+    ln -sf "${ROOT}/shim/client" "${BIN_DIR}/${client}"
+    c_ok "  lanceur  ${client} -> ${real}"
+  done
+
   echo "Réglages Claude Code"
   local dead
   dead="$(node "${ROOT}/src/settings.mjs" dead 2>/dev/null)"
@@ -183,6 +207,18 @@ cmd_install() {
   done
   [ "$stuck" = 1 ] && c_warn "  info  certains skills gstack sont complets, laissés en place"
 
+  local marker2="# deepbridge: coordonnees des clients"
+  for rc in "${HOME}/.bashrc" "${HOME}/.zshrc" "${HOME}/.config/fish/config.fish"; do
+    [ -e "$rc" ] || continue
+    grep -q "$marker2" "$rc" 2>/dev/null && continue
+    if [[ "$rc" == *.fish ]]; then
+      printf '\n%s\nset -gx DEEPAI_BRIDGE_TOKEN (cat ~/.deepai-bridge/token 2>/dev/null)\nset -gx GEMINI_API_KEY $DEEPAI_BRIDGE_TOKEN\nset -gx GOOGLE_GEMINI_BASE_URL http://127.0.0.1:41200\n' "$marker2" >>"$rc"
+    else
+      printf '\n%s\nexport DEEPAI_BRIDGE_TOKEN="$(cat ~/.deepai-bridge/token 2>/dev/null)"\nexport GEMINI_API_KEY="$DEEPAI_BRIDGE_TOKEN"\nexport GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:41200\n' "$marker2" >>"$rc"
+    fi
+    c_ok "coordonnées exportées dans $rc"
+  done
+
   local marker="# deepbridge: claude via DeepAI Code"
   local line="export PATH=\"${BIN_DIR}:\$PATH\"  ${marker}"
   local touched=0
@@ -210,6 +246,18 @@ EOF
 }
 
 cmd_uninstall() {
+  local marker2="# deepbridge: coordonnees des clients"
+  for rc in "${HOME}/.bashrc" "${HOME}/.zshrc" "${HOME}/.config/fish/config.fish"; do
+    [ -e "$rc" ] || continue
+    grep -q "$marker2" "$rc" 2>/dev/null && continue
+    if [[ "$rc" == *.fish ]]; then
+      printf '\n%s\nset -gx DEEPAI_BRIDGE_TOKEN (cat ~/.deepai-bridge/token 2>/dev/null)\nset -gx GEMINI_API_KEY $DEEPAI_BRIDGE_TOKEN\nset -gx GOOGLE_GEMINI_BASE_URL http://127.0.0.1:41200\n' "$marker2" >>"$rc"
+    else
+      printf '\n%s\nexport DEEPAI_BRIDGE_TOKEN="$(cat ~/.deepai-bridge/token 2>/dev/null)"\nexport GEMINI_API_KEY="$DEEPAI_BRIDGE_TOKEN"\nexport GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:41200\n' "$marker2" >>"$rc"
+    fi
+    c_ok "coordonnées exportées dans $rc"
+  done
+
   local marker="# deepbridge: claude via DeepAI Code"
   for rc in "${HOME}/.bashrc" "${HOME}/.zshrc" "${HOME}/.config/fish/config.fish"; do
     [ -e "$rc" ] || continue
@@ -291,6 +339,8 @@ Codex ou n'importe quel client Anthropic/OpenAI.
   api         coordonnées + exemples pour brancher un autre client
   run -- cmd  lance un client (agy, codex, opencode…) avec le bridge
   run -- cmd  lance un client avec le bridge (démarré puis arrêté avec lui)
+  sync        réécrit la liste des modèles chez opencode et codex
+  stop        arrête le bridge
   serve       lance le bridge au premier plan
 EOF
 }
@@ -304,6 +354,8 @@ case "${1:-}" in
   balance) shift; cmd_balance "$@" ;;
   account) shift; cmd_account "$@" ;;
   api) shift; cmd_api "$@" ;;
+  sync) shift; cmd_sync "$@" ;;
+  stop) shift; cmd_stop "$@" ;;
   serve) shift; cmd_serve "$@" ;;
   run) shift; [ "${1:-}" = "--" ] && shift; cmd_run "$@" ;;
   version|-V|--version) echo "deepbridge 1.0.0" ;;

@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# Universal launcher for every client that speaks to the bridge:
+# claude, opencode, codex, agy.
+#
+# Launch the client as usual — this wrapper makes sure the bridge is up first,
+# and does not touch it if another client already started it. The bridge exits
+# on its own after BRIDGE_IDLE_SECONDS without traffic, or when the DeepAI Code
+# app closes.
+set -uo pipefail
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+SELF_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+ROOT="$(cd "$SELF_DIR/.." && pwd)"
+STATE="${HOME}/.deepai-bridge"
+PORT="${BRIDGE_PORT:-41200}"
+URL="http://127.0.0.1:${PORT}"
+APP_BIN="${DEEPAI_APP_BIN:-${HOME}/AppImages/deepai_code.appimage}"
+PID_FILE="${STATE}/bridge.pid"
+LOG="${STATE}/bridge.log"
+
+mkdir -p "$STATE"
+die() { printf 'deepbridge: %s\n' "$1" >&2; exit 1; }
+
+NAME="${DEEPAI_SHIM_CLIENT:-$(basename "$0")}"
+
+# ------------------------------------------------------------------ real binary
+# Walk PATH, skipping our own directory, so the wrapper never calls itself.
+resolve_real() {
+  local name="$1" entry dir
+  while IFS= read -r entry; do
+    [[ -n "$entry" ]] || continue
+    dir="$(cd "$entry" 2>/dev/null && pwd)" || continue
+    [[ -x "${dir}/${name}" && ! -d "${dir}/${name}" ]] || continue
+    # Un lien vers ce script (notre propre dossier) ne compte pas.
+    [[ "$(readlink -f "${dir}/${name}")" == "$SELF" ]] && continue
+    printf '%s' "${dir}/${name}"
+    return 0
+  done < <(printf '%s' "${PATH}" | tr ':' '\n')
+  return 1
+}
+
+REAL="$(resolve_real "$NAME")"
+[[ -n "${REAL:-}" && -x "$REAL" ]] || die "real ${NAME} not found in PATH"
+
+# --------------------------------------------------------------- bridge helpers
+have_transport() {
+  node -e '
+    import(process.argv[1]).then((m) => process.exit(m.findTransport() ? 0 : 1)).catch(() => process.exit(1))
+  ' "file://${ROOT}/src/transport.mjs" 2>/dev/null
+}
+
+ensure_app() {
+  have_transport && return 0
+  [[ -x "$APP_BIN" ]] || die "DeepAI Code not running and $APP_BIN missing"
+  printf 'deepbridge: starting DeepAI Code...\n' >&2
+  setsid "$APP_BIN" >>"${STATE}/app.log" 2>&1 </dev/null &
+  for _ in $(seq 1 60); do have_transport && return 0; sleep 0.5; done
+  die "DeepAI Code did not come up (see ${STATE}/app.log)"
+}
+
+ensure_bridge() {
+  curl -fsS -m 2 "${URL}/health" >/dev/null 2>&1 && return 0
+  ( cd "$ROOT" && setsid node "$ROOT/src/bridge.mjs" >>"$LOG" 2>&1 </dev/null & )
+  for _ in $(seq 1 40); do
+    curl -fsS -m 1 "${URL}/health" >/dev/null 2>&1 && return 0
+    sleep 0.25
+  done
+  tail -n 20 "$LOG" >&2
+  die "bridge failed to start"
+}
+
+# ------------------------------------------------------------------- client env
+apply_env() {
+  case "$NAME" in
+    agy|antigravity)
+      export GEMINI_API_KEY="$(cat "${STATE}/token" 2>/dev/null)"
+      export GOOGLE_GEMINI_BASE_URL="${URL}"
+      ;;
+    codex) export DEEPAI_BRIDGE_TOKEN="$(cat "${STATE}/token" 2>/dev/null)" ;;
+    opencode)
+      export OPENAI_BASE_URL="${URL}/v1"
+      export OPENAI_API_KEY="$(cat "${STATE}/token" 2>/dev/null)"
+      ;;
+    claude)
+      # Settings live in ~/.claude/settings.json; re-assert them so an update or
+      # an edited file cannot silently drop the bridge.
+      node "${ROOT}/src/settings.mjs" write >/dev/null 2>&1 || true
+      ;;
+  esac
+}
+
+# Flags that never need a model: skip the whole dance.
+needs_bridge() {
+  local a
+  for a in "$@"; do
+    case "$a" in
+      --version|-v|-V|--help|-h|help|update|--update|doctor|login|logout|completion) return 1 ;;
+    esac
+  done
+  return 0
+}
+
+if ! needs_bridge "$@"; then
+  exec "$REAL" "$@"
+fi
+
+ensure_app
+ensure_bridge
+apply_env
+exec "$REAL" "$@"

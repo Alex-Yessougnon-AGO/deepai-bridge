@@ -910,8 +910,32 @@ server.listen(PORT, HOST, async () => {
   }
   // Follow the app: exit when its transport disappears.
   if (process.env.BRIDGE_STAY_ALIVE !== "1") {
+    // Also exit once nobody has talked to us for a while, so several clients
+    // can share one bridge without anyone owning its lifetime.
+    const idle = Number(process.env.BRIDGE_IDLE_SECONDS ?? 600) * 1000;
+    let last = Date.now();
+    server.on("request", () => {
+      last = Date.now();
+    });
+    if (idle > 0) {
+      setInterval(() => {
+        if (Date.now() - last < idle) return;
+        log(`idle ${Math.round(idle / 1000)}s; exiting`);
+        server.close(() => process.exit(0));
+        setTimeout(() => process.exit(0), 1500).unref();
+      }, 15000).unref();
+    }
+    let misses = 0;
     setInterval(() => {
-      if (!findTransport()) {
+      let alive = false;
+      try {
+        alive = Boolean(findTransport());
+      } catch (e) {
+        log("transport-check-error", e.message);
+        alive = true; // une erreur de lecture n'est pas une disparition
+      }
+      misses = alive ? 0 : misses + 1;
+      if (misses >= 2) {
         log("transport gone; exiting");
         server.close(() => process.exit(0));
         setTimeout(() => process.exit(0), 1500).unref();
@@ -922,5 +946,7 @@ server.listen(PORT, HOST, async () => {
 
 for (const sig of ["SIGTERM", "SIGINT"]) process.on(sig, () => process.exit(0));
 process.on("unhandledRejection", (e) => log("unhandled", String(e)));
+// Un minuteur qui jette ne doit pas emporter le bridge sans trace.
+process.on("uncaughtException", (e) => log("uncaught", e.stack || String(e)));
 
 void sleep;

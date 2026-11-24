@@ -66,6 +66,13 @@ and the bridge stops when you quit.
 
 Check the chain: `deepbridge doctor` · Remove: `deepbridge uninstall`
 
+## Launching a client
+
+`install` puts launchers in front of the real binaries: run `claude`, `opencode`,
+`codex` or `agy` as usual and the bridge follows. A second client reuses the
+running bridge without tearing it down; it exits on its own after ten idle
+minutes (`deepbridge stop` to cut it now).
+
 ## Commands
 
 | Command | Effect |

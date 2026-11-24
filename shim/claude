@@ -93,6 +93,15 @@ start_bridge() {
 
 cleanup() {
   if [[ "${STARTED:-0}" == "1" && -n "${BRIDGE_PID:-}" ]]; then
+    # Un autre client peut travailler encore : n'arrête le bridge qu'une fois
+    # le journal retombé, sans dépasser BRIDGE_DRAIN_SECONDS.
+    local idle=0 last before
+    last="$(wc -l <"$LOG" 2>/dev/null || echo 0)"
+    while (( idle < ${BRIDGE_DRAIN_SECONDS:-30} )); do
+      sleep 1; idle=$((idle + 1))
+      before="$(wc -l <"$LOG" 2>/dev/null || echo 0)"
+      [[ "$before" != "$last" ]] && { last="$before"; idle=0; }
+    done
     kill "$BRIDGE_PID" 2>/dev/null || true
     # Wait briefly so the port is free for the next session.
     for _ in $(seq 1 20); do
