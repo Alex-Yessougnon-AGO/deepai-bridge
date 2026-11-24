@@ -175,6 +175,9 @@ function translate(body, model) {
     out.tool_choice = body.tool_choice?.type === "auto" ? "auto" : "auto";
   }
   if (typeof body.temperature === "number") out.temperature = body.temperature;
+  if (typeof body.top_p === "number") out.top_p = body.top_p;
+  if (Array.isArray(body.stop_sequences) && body.stop_sequences.length)
+    out.stop = body.stop_sequences.slice(0, 4);
   out.prompt_cache_key = body.metadata?.user_id
     ? String(body.metadata.user_id).slice(0, 256)
     : crypto.randomUUID();
@@ -521,6 +524,13 @@ async function responsesApi(req, res, body) {
     if (body.parallel_tool_calls !== undefined) payload.parallel_tool_calls = body.parallel_tool_calls;
   }
   if (body.max_output_tokens) payload.max_tokens = Math.min(body.max_output_tokens, MAX_OUTPUT);
+  if (typeof body.temperature === "number") payload.temperature = body.temperature;
+  if (typeof body.top_p === "number") payload.top_p = body.top_p;
+  const fmt = body.text?.format;
+  if (fmt?.type === "json_schema" && fmt.schema)
+    payload.response_format = { type: "json_schema", json_schema: { name: fmt.name || "out", schema: fmt.schema } };
+  else if (fmt?.type === "json_object") payload.response_format = { type: "json_object" };
+  if (body.reasoning?.effort) payload.reasoning_effort = body.reasoning.effort;
   const id = `resp_${Math.random().toString(36).slice(2, 12)}`;
 
   log("responses", entry.model, `${messages.length}msg`, payload.stream ? "stream" : "once");
@@ -695,6 +705,23 @@ function geminiRequest(body) {
   if (gen.maxOutputTokens || gen.max_output_tokens)
     payload.max_tokens = Math.min(gen.maxOutputTokens || gen.max_output_tokens, MAX_OUTPUT);
   if (gen.temperature !== undefined) payload.temperature = gen.temperature;
+  if (gen.topP !== undefined || gen.top_p !== undefined) payload.top_p = gen.topP ?? gen.top_p;
+  if (gen.topK !== undefined || gen.top_k !== undefined) payload.top_k = gen.topK ?? gen.top_k;
+  const stops = gen.stopSequences || gen.stop_sequences;
+  if (Array.isArray(stops) && stops.length) payload.stop = stops.slice(0, 4);
+
+  // Gemini porte le JSON garanti dans responseMimeType/responseSchema.
+  const mime = gen.responseMimeType || gen.response_mime_type;
+  const schema = gen.responseSchema || gen.response_schema;
+  if (schema) payload.response_format = { type: "json_schema", json_schema: { name: "out", schema } };
+  else if (mime === "application/json") payload.response_format = { type: "json_object" };
+
+  // Budget de réflexion -> effort, comme le fait le dialecte Anthropic.
+  const think = body.thinkingConfig || body.thinking_config;
+  const budget = think?.thinkingBudget ?? think?.thinking_budget;
+  if (typeof budget === "number") {
+    payload.reasoning_effort = budget === 0 ? "none" : budget > 12000 ? "high" : budget > 4000 ? "medium" : "low";
+  }
 
   const decls = (body.tools || []).flatMap((t) => t.functionDeclarations || t.function_declarations || []);
   if (decls.length)
@@ -731,6 +758,8 @@ async function geminiGenerate(req, res, body, modelId, stream) {
   payload.model = entry.model;
   payload.stream = stream;
   log("gemini", entry.model, `${payload.messages.length}msg`, stream ? "stream" : "once");
+  if (process.env.BRIDGE_VERBOSE)
+    log("gemini-params", JSON.stringify({ effort: payload.reasoning_effort, format: payload.response_format?.type, t: payload.temperature, top_p: payload.top_p, top_k: payload.top_k, stop: payload.stop, tools: payload.tools?.length }));
 
   const { res: up, error } = await upstream(payload);
   if (error) return send(res, error.code, err(error.message));
@@ -900,6 +929,17 @@ const server = http.createServer((req, res) => {
 });
 
 // -------------------------------------------------------------------- boot
+// Un autre bridge tient déjà le port : ce n'est pas une erreur, c'est le même
+// service rendu par un autre processus.
+server.on("error", (e) => {
+  if (e.code === "EADDRINUSE") {
+    log(`port ${PORT} déjà tenu ; instance superflue qui s'arrête`);
+    process.exit(0);
+  }
+  log("server-error", e.message);
+  process.exit(1);
+});
+
 server.listen(PORT, HOST, async () => {
   fs.mkdirSync(STATE, { recursive: true });
   fs.writeFileSync(PID_FILE, String(process.pid));

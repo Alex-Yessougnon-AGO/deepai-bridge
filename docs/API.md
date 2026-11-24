@@ -36,6 +36,38 @@ schema allows:
 `GET /v1/models` returns both, plus `price.theos_per_request` and
 `price.free`.
 
+## Paramètres transmis
+
+Rien n'est jeté en chemin. Les trois dialectes passent leurs paramètres de
+génération au canal commun : `temperature`, `top_p`, `top_k`, `stop`/`stop_sequences`,
+`max_tokens`/`maxOutputTokens`/`max_output_tokens`, les outils.
+
+Le raisonnement suit aussi :
+
+- Anthropic `thinking.budget_tokens` → `reasoning_effort`
+- Gemini `thinkingConfig.thinkingBudget` → `reasoning_effort` (0 = none)
+- Responses `reasoning.effort` → `reasoning_effort`
+
+Les formats de sortie structurés également : `responseMimeType`,
+`responseSchema` et `text.format` deviennent `response_format` (objet ou schéma
+JSON). Le texte de réflexion revient en `reasoning_summary_text.delta` côté
+Responses et en `reasoning`/`reasoning_details` côté chat.
+
+`BRIDGE_VERBOSE=1` journalise les paramètres retenus, sans le contenu.
+
+## Service permanent
+
+Par défaut le bridge vit avec la session et s'arrête après inactivité. Pour
+qu'il tourne toujours — plusieurs clients, longues sessions — installe le
+service utilisateur :
+
+```bash
+deepbridge service install
+```
+
+Il redémarre seul, survit à la fermeture de l'app (les requêtes répondent 503 le
+temps qu'elle revienne) et se coupe par `deepbridge service uninstall`.
+
 ## Lancement
 
 `deepbridge install` place un lanceur pour chaque client détecté (`claude`,

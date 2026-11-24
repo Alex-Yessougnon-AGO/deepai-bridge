@@ -58,8 +58,14 @@ ensure_app() {
   die "DeepAI Code did not come up (see ${STATE}/app.log)"
 }
 
+bridge_managed() {
+  command -v systemctl >/dev/null 2>&1 || return 1
+  [[ "$(systemctl --user is-active deepbridge.service 2>/dev/null)" == "active" ]]
+}
+
 ensure_bridge() {
   curl -fsS -m 2 "${URL}/health" >/dev/null 2>&1 && return 0
+  if bridge_managed; then systemctl --user restart deepbridge.service; fi
   ( cd "$ROOT" && setsid node "$ROOT/src/bridge.mjs" >>"$LOG" 2>&1 </dev/null & )
   for _ in $(seq 1 40); do
     curl -fsS -m 1 "${URL}/health" >/dev/null 2>&1 && return 0

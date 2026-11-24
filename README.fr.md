@@ -66,6 +66,12 @@ modèles, et le bridge s'arrête quand tu quittes.
 
 Vérifier la chaîne : `deepbridge doctor` · Désinstaller : `deepbridge uninstall`
 
+## Service permanent
+
+Pour que le pont tourne toujours (plusieurs clients, longues sessions) :
+`deepbridge service install`. Sinon il vit avec la session et s'arrête après
+inactivité.
+
 ## Lancer un client
 
 Les lanceurs sont posés par `install` : lance `claude`, `opencode`, `codex` ou

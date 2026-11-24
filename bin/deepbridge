@@ -64,6 +64,47 @@ cmd_sync() {
   node "${ROOT}/src/clients.mjs" codex >/dev/null 2>&1 || true
 }
 
+UNIT="${HOME}/.config/systemd/user/deepbridge.service"
+
+cmd_service() {
+  local action="${1:-status}"
+  case "$action" in
+    install)
+      command -v systemctl >/dev/null || die "systemctl absent"
+      mkdir -p "$(dirname "$UNIT")"
+      cat >"$UNIT" <<EOF
+[Unit]
+Description=deepbridge — bridge DeepAI Code
+After=default.target
+
+[Service]
+Type=simple
+Environment=BRIDGE_STAY_ALIVE=1
+Environment=BRIDGE_PORT=${PORT}
+ExecStart=$(command -v node) ${ROOT}/src/bridge.mjs
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+EOF
+      systemctl --user daemon-reload
+      systemctl --user enable --now deepbridge.service >/dev/null 2>&1
+      sleep 1
+      systemctl --user is-active deepbridge.service | grep -q '^active' \
+        && c_ok "service actif : le bridge tourne en permanence, plus de déconnexion"
+      ;;
+    uninstall)
+      systemctl --user disable --now deepbridge.service >/dev/null 2>&1
+      rm -f "$UNIT"; systemctl --user daemon-reload
+      c_ok "service retiré"
+      ;;
+    *)
+      systemctl --user status deepbridge.service --no-pager 2>/dev/null | head -6
+      ;;
+  esac
+}
+
 cmd_stop() {
   local pid; pid="$(cat "${STATE}/bridge.pid" 2>/dev/null || true)"
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
@@ -341,6 +382,7 @@ Codex ou n'importe quel client Anthropic/OpenAI.
   run -- cmd  lance un client avec le bridge (démarré puis arrêté avec lui)
   sync        réécrit la liste des modèles chez opencode et codex
   stop        arrête le bridge
+  service     bridge en service permanent (install|uninstall|status)
   serve       lance le bridge au premier plan
 EOF
 }
@@ -356,6 +398,7 @@ case "${1:-}" in
   api) shift; cmd_api "$@" ;;
   sync) shift; cmd_sync "$@" ;;
   stop) shift; cmd_stop "$@" ;;
+  service) shift; cmd_service "$@" ;;
   serve) shift; cmd_serve "$@" ;;
   run) shift; [ "${1:-}" = "--" ] && shift; cmd_run "$@" ;;
   version|-V|--version) echo "deepbridge 1.0.0" ;;

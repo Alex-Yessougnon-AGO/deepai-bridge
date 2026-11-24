@@ -66,6 +66,34 @@ function syncCodex() {
   return { file, added: false };
 }
 
+function syncAgy() {
+  const file = path.join(HOME, ".gemini", "antigravity-cli", "settings.json");
+  if (!fs.existsSync(path.dirname(file))) return { skipped: "agy absent" };
+  const data = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
+
+  const custom = {};
+  for (const m of catalogue()) {
+    custom[m.id] = {
+      apiProvider: "openai",
+      label: label(m),
+      modelName: `gemini-api://${m.model}`,
+    };
+  }
+  data.modelProvider = "gemini";
+  data.customModelsConfig = { customModels: custom };
+  if (!data.model || !custom[data.model]) data.model = "deepseek";
+  backup(file);
+  fs.writeFileSync(file, JSON.stringify(data, null, 2));
+  return { file, models: Object.keys(custom).length };
+}
+
 const which = process.argv[2];
-const out = which === "opencode" ? syncOpencode() : which === "codex" ? syncCodex() : {};
+const out =
+  which === "opencode"
+    ? syncOpencode()
+    : which === "codex"
+      ? syncCodex()
+      : which === "agy"
+        ? syncAgy()
+        : {};
 process.stdout.write(JSON.stringify(out) + "\n");

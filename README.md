@@ -66,6 +66,12 @@ and the bridge stops when you quit.
 
 Check the chain: `deepbridge doctor` · Remove: `deepbridge uninstall`
 
+## Always-on service
+
+To keep the bridge running for good (several clients, long sessions):
+`deepbridge service install`. Otherwise it lives with the session and exits when
+idle.
+
 ## Launching a client
 
 `install` puts launchers in front of the real binaries: run `claude`, `opencode`,
