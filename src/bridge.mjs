@@ -450,6 +450,174 @@ async function chatCompletions(req, res, body) {
   if (!res.writableEnded) res.end();
 }
 
+// ------------------------------------------------------------------ responses
+// Codex and the OpenAI SDKs' `responses` API. Translated onto the chat
+// completion lane, then re-shaped into Responses events.
+function responsesInput(body) {
+  const out = [];
+  const push = (role, content) => {
+    const text = typeof content === "string"
+      ? content
+      : Array.isArray(content)
+        ? content.map((p) => (typeof p === "string" ? p : p?.text ?? p?.content ?? "")).join("")
+        : "";
+    if (text) out.push({ role, content: text });
+  };
+  if (typeof body.input === "string") push("user", body.input);
+  else if (Array.isArray(body.input)) {
+    for (const item of body.input) {
+      if (!item) continue;
+      if (item.type === "message" || item.role) push(item.role === "developer" ? "system" : item.role, item.content);
+      else if (item.type === "function_call_output") push("tool", item.output);
+      else if (item.content) push("user", item.content);
+    }
+  }
+  if (typeof body.instructions === "string" && body.instructions) out.unshift({ role: "system", content: body.instructions });
+  return out;
+}
+
+function responsesShape(id, model, text, usage, status = "completed") {
+  return {
+    id,
+    object: "response",
+    created_at: Math.floor(Date.now() / 1000),
+    status,
+    model,
+    output: text
+      ? [{ type: "message", id: `${id}_msg`, status: "completed", role: "assistant", content: [{ type: "output_text", text, annotations: [] }] }]
+      : [],
+    output_text: text || "",
+    usage: usage
+      ? { input_tokens: usage.prompt_tokens ?? 0, output_tokens: usage.completion_tokens ?? 0, total_tokens: usage.total_tokens ?? 0 }
+      : undefined,
+  };
+}
+
+async function responsesApi(req, res, body) {
+  const { entry } = await choose(body.model);
+  if (!entry) return send(res, 503, err("No model available.", "overloaded_error"));
+
+  const messages = responsesInput(body);
+  if (!messages.some((m) => m.role === "system"))
+    messages.unshift({ role: "system", content: "You are a helpful coding assistant." });
+
+  const payload = {
+    model: entry.model,
+    messages,
+    stream: Boolean(body.stream),
+  };
+  // Responses puts name/parameters at the top level; the chat lane wants them
+  // nested under `function`.
+  const tools = body.tools || body.functions;
+  if (Array.isArray(tools)) {
+    payload.tools = tools
+      .filter((t) => t && (t.function || t.name))
+      .map((t) =>
+        t.function
+          ? t
+          : { type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } }
+      );
+    if (body.tool_choice) payload.tool_choice = body.tool_choice;
+    if (body.parallel_tool_calls !== undefined) payload.parallel_tool_calls = body.parallel_tool_calls;
+  }
+  if (body.max_output_tokens) payload.max_tokens = Math.min(body.max_output_tokens, MAX_OUTPUT);
+  const id = `resp_${Math.random().toString(36).slice(2, 12)}`;
+
+  log("responses", entry.model, `${messages.length}msg`, payload.stream ? "stream" : "once");
+
+  const { res: up, error } = await upstream(payload);
+  if (error) return send(res, error.code, err(error.message));
+  if (!up.ok) {
+    const text = await up.text().catch(() => "");
+    return send(res, up.status, JSON.parse(text || "{}") ?? err(text));
+  }
+
+  if (!payload.stream) {
+    const data = await up.json();
+    const text = data.choices?.[0]?.message?.content ?? "";
+    const shape = responsesShape(id, entry.id, text, data.usage);
+    for (const call of data.choices?.[0]?.message?.tool_calls || []) {
+      shape.output.push({
+        type: "function_call",
+        id: `${id}_call${call.index ?? shape.output.length}`,
+        call_id: call.id,
+        name: call.function?.name,
+        arguments: call.function?.arguments ?? "{}",
+        status: "completed",
+      });
+    }
+    return send(res, 200, shape);
+  }
+
+  res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+  const emit = (type, data) => {
+    if (!res.writableEnded) res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
+  };
+  emit("response.created", { response: responsesShape(id, entry.id, "", null, "in_progress") });
+  emit("response.output_item.added", {
+    output_index: 0,
+    item: { type: "message", id: `${id}_msg`, status: "in_progress", role: "assistant", content: [] },
+  });
+
+  const reader = up.body.getReader();
+  const decoder = new TextDecoder();
+  let carry = "";
+  let text = "";
+  let usage = null;
+  let index = 0;
+  const calls = [];
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      carry += decoder.decode(value, { stream: true });
+      const lines = carry.split("\n");
+      carry = lines.pop() || "";
+      for (const line of lines) {
+        if (!line.startsWith("data:")) continue;
+        const raw = line.slice(5).trim();
+        if (!raw || raw === "[DONE]") continue;
+        let chunk;
+        try {
+          chunk = JSON.parse(raw);
+        } catch {
+          continue;
+        }
+        if (chunk.usage) usage = chunk.usage;
+        for (const call of chunk.choices?.[0]?.delta?.tool_calls || []) {
+          const slot = (calls[call.index ?? 0] ||= { id: call.id, name: "", args: "" });
+          if (call.id) slot.id = call.id;
+          if (call.function?.name) slot.name = call.function.name;
+          if (call.function?.arguments) slot.args += call.function.arguments;
+        }
+        const delta = chunk.choices?.[0]?.delta?.content;
+        if (delta) {
+          text += delta;
+          emit("response.output_text.delta", { item_id: `${id}_msg`, output_index: 0, content_index: 0, delta });
+          index++;
+        }
+      }
+    }
+  } catch (e) {
+    log("responses-stream-error", e.message);
+  }
+  if (text) emit("response.output_text.done", { item_id: `${id}_msg`, output_index: 0, content_index: 0, text });
+
+  const shape = responsesShape(id, entry.id, text, usage);
+  calls.forEach((call, i) => {
+    const callId = `${id}_call${i}`;
+    const item = { type: "function_call", id: callId, call_id: call.id || callId, name: call.name, arguments: "" };
+    emit("response.output_item.added", { output_index: shape.output.length + i, item });
+    emit("response.function_call_arguments.delta", { item_id: callId, output_index: shape.output.length + i, delta: call.args });
+    emit("response.function_call_arguments.done", { item_id: callId, output_index: shape.output.length + i, arguments: call.args });
+    shape.output.push({ ...item, arguments: call.args, status: "completed" });
+  });
+
+  emit("response.completed", { response: shape });
+  if (!res.writableEnded) res.end();
+  void index;
+}
+
 // ------------------------------------------------------------------ routing
 function modelList(origin) {
   const free = new Set(freeModels().map((m) => m.id));
@@ -506,7 +674,8 @@ const server = http.createServer((req, res) => {
 
   const isMessages = p === "/v1/messages" || p === "/messages";
   const isChat = p === "/v1/chat/completions" || p === "/chat/completions";
-  if (!isMessages && !isChat) return send(res, 404, err(`Unsupported path ${p}`, "not_found_error"));
+  const isResponses = p === "/v1/responses" || p === "/responses";
+  if (!isMessages && !isChat && !isResponses) return send(res, 404, err(`Unsupported path ${p}`, "not_found_error"));
 
   const chunks = [];
   let size = 0;
@@ -525,7 +694,7 @@ const server = http.createServer((req, res) => {
     } catch {
       return send(res, 400, err("Invalid JSON body.", "invalid_request_error"));
     }
-    const run = isMessages ? messages : chatCompletions;
+    const run = isMessages ? messages : isResponses ? responsesApi : chatCompletions;
     run(req, res, body).catch((e) => {
       log("handler", e.message);
       if (!res.headersSent) send(res, 500, err(e.message));

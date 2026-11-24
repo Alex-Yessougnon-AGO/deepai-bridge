@@ -104,10 +104,14 @@ model_provider = "deepai"
 name = "DeepAI Code"
 base_url = "http://127.0.0.1:41200/v1"
 env_key = "DEEPAI_BRIDGE_TOKEN"
-wire_api = "chat"
+wire_api = "responses"   # ou "chat"
 ```
 
-**curl**:
+Clientes sin descubrimiento de modelos: `GET /v1/models`. Se sirven ambos
+protocolos OpenAI (`responses` y `chat/completions`) y Anthropic (`messages`).
+Guía completa: [docs/API.md](docs/API.md).
+
+**curl** :
 
 ```bash
 curl http://127.0.0.1:41200/v1/chat/completions \

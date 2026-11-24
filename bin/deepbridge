@@ -197,28 +197,40 @@ cmd_status() {
 
 cmd_api() {
   need_bridge
+  local tok model raw
+  tok="$(token)"
+  model="$(node -e 'import(process.argv[1]).then(m=>console.log(m.defaultModel()||""))' "file://${ROOT}/src/catalog.mjs" 2>/dev/null)"
+  model="${model:-${BRIDGE_DEFAULT_MODEL:-deepseek-v4.1-flash}}"
+  raw="${model##*--}"
   cat <<EOF
 Base URL : ${URL}
-Token    : $(token)
+Token    : ${tok}
 
-Anthropic (Claude Code, ou tout client Anthropic) :
+Anthropic (Claude Code, SDK Anthropic, tout client Anthropic) :
   ANTHROPIC_BASE_URL=${URL}
-  ANTHROPIC_AUTH_TOKEN=$(token)
+  ANTHROPIC_AUTH_TOKEN=${tok}
 
-OpenAI (opencode, Codex, SDK OpenAI, curl) :
+OpenAI (opencode, Codex, SDK OpenAI, LangChain, curl) :
   OPENAI_BASE_URL=${URL}/v1
-  OPENAI_API_KEY=$(token)
+  OPENAI_API_KEY=${tok}
+
+Les clients qui savent découvrir les modèles les listent seuls :
+  GET ${URL}/v1/models
+
+Équivalences d'identifiants (les deux marchent, aucun autre préfixe) :
+  Claude Code / Anthropic : ${model}
+  OpenAI / SDK            : ${raw}
 
 Exemples :
-  curl ${URL}/v1/messages -H "authorization: Bearer $(token)" \\
+  curl ${URL}/v1/chat/completions -H "authorization: Bearer ${tok}" \\
     -H 'content-type: application/json' \\
-    -d '{"model":"claude-3-haiku--glm-5.3-flash","max_tokens":200,"messages":[{"role":"user","content":"hi"}]}'
+    -d '{"model":"${raw}","messages":[{"role":"user","content":"hi"}]}'
 
-  curl ${URL}/v1/chat/completions -H "authorization: Bearer $(token)" \\
+  curl ${URL}/v1/messages -H "authorization: Bearer ${tok}" \\
     -H 'content-type: application/json' \\
-    -d '{"model":"glm-5.3-flash","messages":[{"role":"user","content":"hi"}]}'
+    -d '{"model":"${model}","max_tokens":200,"messages":[{"role":"user","content":"hi"}]}'
 
-Les ids OpenAI acceptent le nom brut (glm-5.3-flash) ou l'id Claude Code.
+Guide complet : docs/API.md
 EOF
 }
 

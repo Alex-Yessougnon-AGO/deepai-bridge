@@ -104,8 +104,12 @@ model_provider = "deepai"
 name = "DeepAI Code"
 base_url = "http://127.0.0.1:41200/v1"
 env_key = "DEEPAI_BRIDGE_TOKEN"
-wire_api = "chat"
+wire_api = "responses"   # ou "chat"
 ```
+
+Clients ohne Modellerkennung: `GET /v1/models`. Beide OpenAI-Protokolle
+(`responses` und `chat/completions`) und Anthropic (`messages`) werden bedient.
+Vollständige Anleitung: [docs/API.md](docs/API.md).
 
 ## Konto wechseln
 

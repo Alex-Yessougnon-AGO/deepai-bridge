@@ -105,8 +105,12 @@ model_provider = "deepai"
 name = "DeepAI Code"
 base_url = "http://127.0.0.1:41200/v1"
 env_key = "DEEPAI_BRIDGE_TOKEN"
-wire_api = "chat"
+wire_api = "responses"   # ou "chat"
 ```
+
+Les clients sans découverte de modèles : `GET /v1/models`. Les deux
+protocoles OpenAI (`responses` et `chat/completions`) et Anthropic
+(`messages`) sont servis. Guide complet : [docs/API.md](docs/API.md).
 
 **curl**:
 
@@ -152,6 +156,7 @@ hits zero the bridge falls back to a free model by itself, unless
 
 ## How it works
 
+- [docs/API.md](docs/API.md) — every client, both protocols, limits
 - [docs/DESIGN.md](docs/DESIGN.md) — how the bridge reaches the app
 - [docs/MODELS.md](docs/MODELS.md) — model naming and warning suppression
 - [docs/THEOS.md](docs/THEOS.md) — how theos are granted
