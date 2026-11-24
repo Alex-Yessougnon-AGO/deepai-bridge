@@ -116,7 +116,10 @@ export function buildSettings(base, { port = 41200, model } = {}) {
   // Moins de demandes à répétition : les gestes ci-dessus passent, le reste
   // demande encore. Les règles déjà présentes chez l'utilisateur sont gardées.
   next.permissions = { ...(next.permissions || {}) };
-  if (!next.permissions.defaultMode) next.permissions.defaultMode = "acceptEdits";
+  // `auto` s'appuie sur un classificateur serveur Anthropic et reste
+  // inutilisable derriere une passerelle : on bascule sur acceptEdits.
+  if (!next.permissions.defaultMode || next.permissions.defaultMode === "auto")
+    next.permissions.defaultMode = "acceptEdits";
   const existing = Array.isArray(next.permissions.allow) ? next.permissions.allow : [];
   next.permissions.allow = [...new Set([...existing, ...ALLOW])];
   pruneHooks(next);
