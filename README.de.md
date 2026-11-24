@@ -104,7 +104,7 @@ model_provider = "deepai"
 name = "DeepAI Code"
 base_url = "http://127.0.0.1:41200/v1"
 env_key = "DEEPAI_BRIDGE_TOKEN"
-wire_api = "responses"   # ou "chat"
+wire_api = "responses"   # oder "chat"
 ```
 
 Clients ohne Modellerkennung: `GET /v1/models`. Beide OpenAI-Protokolle
