@@ -109,6 +109,38 @@ cmd_install() {
   ln -sf "${ROOT}/shim/claude" "${BIN_DIR}/claude"
   ln -sf "${ROOT}/bin/deepbridge" "${BIN_DIR}/deepbridge"
   unset -f claude 2>/dev/null || true
+
+  echo "Réglages Claude Code"
+  local dead
+  dead="$(node "${ROOT}/src/settings.mjs" dead 2>/dev/null)"
+  if [ -n "$dead" ] && [ "$dead" != "[]" ]; then
+    printf '%s\n' "$dead" | node -e 'let r="";process.stdin.on("data",c=>r+=c).on("end",()=>{for(const h of JSON.parse(r))console.log(`  retiré  hook ${h.event} mort: ${h.command}`)})'
+  fi
+  node "${ROOT}/src/settings.mjs" write >/dev/null || die "impossible d’écrire les réglages"
+  c_ok "  réglages écrits (~/.claude/settings.json, sauvegarde conservée)"
+
+  local stuck=0
+  local disabled="${HOME}/.claude/skills-disabled"
+  for skill in gstack _gstack-command gstack-upgrade open-gstack-browser; do
+    local dir="${HOME}/.claude/skills/${skill}"
+    [ -e "$dir" ] || [ -L "$dir" ] || continue
+    local empty=0
+    if [ -L "$dir" ] && [ ! -e "$dir" ]; then empty=1; fi          # lien mort
+    if [ -d "$dir" ] && [ -z "$(ls -A "$dir" 2>/dev/null)" ]; then empty=1; fi
+    if [ "$empty" = 1 ]; then
+      rm -rf "$dir" && c_ok "  retiré  ${skill} (mort)" || c_err "  échec retrait ${skill}"
+      continue
+    fi
+    # gstack laissé en place mais serviable : on le désactive seulement si le
+    # routeur est absent
+    if [ "$skill" != "gstack" ] && [ ! -e "${HOME}/.claude/skills/_gstack-command" ] && [ ! -e "${HOME}/.claude/skills/gstack" ]; then
+      mkdir -p "$disabled" && mv "$dir" "$disabled/" && c_ok "  déplacé  ${skill} (orphelin)"
+    else
+      stuck=1
+    fi
+  done
+  [ "$stuck" = 1 ] && c_warn "  info  certains skills gstack sont complets, laissés en place"
+
   local marker="# deepbridge: claude via DeepAI Code"
   local line="export PATH=\"${BIN_DIR}:\$PATH\"  ${marker}"
   local touched=0
@@ -144,6 +176,7 @@ cmd_uninstall() {
     c_ok "nettoyé: $rc"
   done
   rm -f "${BIN_DIR}/claude" "${BIN_DIR}/deepbridge"
+  node "${ROOT}/src/settings.mjs" restore >/dev/null 2>&1 && c_ok "réglages Claude Code restaurés"
   local pid; pid="$(cat "${STATE}/bridge.pid" 2>/dev/null || true)"
   [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
   c_ok "désinstallé"

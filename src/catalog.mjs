@@ -82,7 +82,17 @@ export function catalogue() {
 }
 
 export const freeModels = () => catalogue().filter((m) => m.free);
-export const defaultModel = () => freeModels()[0]?.id ?? catalogue()[0]?.id;
+
+/** Preferred starting model, then first free, then anything. */
+const PREFERRED = ["deepseek-v4.1-flash", "glm-5.3-flash"];
+export function defaultModel() {
+  const free = freeModels();
+  for (const id of PREFERRED) {
+    const hit = free.find((m) => m.model === id);
+    if (hit) return hit.id;
+  }
+  return free[0]?.id ?? catalogue()[0]?.id ?? null;
+}
 
 /** Claude Code id -> catalogue entry. Accepts the bare model id too. */
 export function resolveModel(requested) {

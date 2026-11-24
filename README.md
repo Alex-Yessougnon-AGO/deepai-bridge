@@ -1,82 +1,86 @@
 # deepai-bridge
 
-Utiliser les modèles de **DeepAI Code** depuis **Claude Code**, **opencode**,
-**Codex** ou n'importe quel client Anthropic/OpenAI — y compris les modèles
-gratuits à 0 théo.
+**English** · [Français](README.fr.md) · [Español](README.es.md) · [Deutsch](README.de.md)
+
+Use **DeepAI Code** models from **Claude Code**, **opencode**, **Codex** or any
+Anthropic/OpenAI client — including the free 0-theo models.
 
 ```
 Claude Code ─┐
-opencode ────┼─> deepai-bridge (127.0.0.1:41200) ─> transport local de l'app ─> DeepAI
-Codex ───────┤        traduit Anthropic/OpenAI            (clés, lane, check-in)
+opencode ────┼─> deepai-bridge (127.0.0.1:41200) ─> app's local transport ─> DeepAI
+Codex ───────┤        translates Anthropic/OpenAI      (keys, lane, check-in)
 curl ────────┘
 ```
 
-## Ce que ça fait
+## What it does
 
-- expose les **28 modèles** du compte connecté : les 12 gratuits (0 théo) et les
-  16 payants, chacun étiqueté `GRATUIT` ou `<n> théos`, prix et fenêtre de
-  contexte compris ;
-- traduit l'API **Anthropic Messages** (`/v1/messages`) et l'API **OpenAI**
-  (`/v1/chat/completions`), streaming SSE et tool calls inclus ;
-- **démarre avec la session `claude` et s'arrête avec elle** ;
-- nomme les modèles pour que Claude Code les accepte sans le moindre
-  avertissement « doesn't recognize the model » ;
-- affiche le **solde de théos** et le prochain gain.
+- exposes every model of the signed-in account — the 12 free (0 theo) ones and
+  the 16 paid ones — each labelled `FREE` or `<n> theos`, price and context
+  window included;
+- translates the **Anthropic Messages** API (`/v1/messages`) and the **OpenAI**
+  API (`/v1/chat/completions`), streaming SSE and tool calls included;
+- **starts with the `claude` session and stops with it**;
+- names the models so Claude Code accepts them with no
+  "doesn't recognize the model" warning, and hides the built-in Claude models
+  from `/model`;
+- shows the **theos balance** and the next refill.
 
-## Ce que ça ne fait pas
+## What it does not do
 
-Il ne simule pas l'application et ne contourne aucun contrôle. L'app reste le
-client : c'est son processus `pi` qui porte le token, ses en-têtes de lane, son
-check-in et sa liaison machine. Le bridge ne fait que **traduire un protocole**.
-C'est pour ça qu'il survit aux mises à jour de l'app et qu'il n'y a pas de
-tiers à tenir à jour.
+It does not impersonate the app or bypass any control. The app stays the client:
+its `pi` process holds the token, its lane headers, its check-in and its machine
+binding. The bridge only **translates a protocol**. That is why it survives app
+updates and needs no maintenance.
 
-Conséquences assumées :
+Assumed consequences:
 
-- **l'app DeepAI Code doit tourner** — elle porte les credentials ; le bridge
-  la démarre si besoin et s'arrête quand elle s'arrête ;
-- Linux uniquement (le token est lu dans `/proc/<pid>/environ`) ;
-- le **grant de théos est décidé côté serveur**, par machine et par jour. Rien
-  côté client ne l'augmente. Voir [docs/THEOS.md](docs/THEOS.md).
+- **DeepAI Code must be running** — it holds the credentials; the bridge starts
+  it if needed and exits when it goes away;
+- the **theos grant is decided server-side**, per machine and per day. Nothing on
+  the client raises it. See [docs/THEOS.md](docs/THEOS.md).
 
-## Installation
+## Install
+
+Linux and macOS:
 
 ```bash
-git clone <ce-depot> ~/deepai-bridge
+git clone https://github.com/<you>/deepai-bridge ~/deepai-bridge
 cd ~/deepai-bridge
 ./bin/deepbridge install
 ```
 
-Puis, dans un nouveau terminal :
+Windows: see [docs/PLATFORMS.md](docs/PLATFORMS.md#windows).
+Docker and remote setups: [docs/PLATFORMS.md](docs/PLATFORMS.md#docker).
+
+Then open a new terminal and run:
 
 ```bash
 claude
 ```
 
-C'est tout : le bridge démarre avec la session, Claude Code liste tous les
-modèles, et le bridge s'arrête quand tu quittes.
+That is all: the bridge starts with the session, Claude Code lists every model,
+and the bridge stops when you quit.
 
-Vérifier la chaîne : `deepbridge doctor`
-Désinstaller : `deepbridge uninstall`
+Check the chain: `deepbridge doctor` · Remove: `deepbridge uninstall`
 
-## Commandes
+## Commands
 
-| Commande | Effet |
+| Command | Effect |
 |---|---|
-| `deepbridge models` | liste les modèles, gratuits et payants, avec leur prix |
-| `deepbridge balance` | solde de théos et prochain gain |
-| `deepbridge account` | compte DeepAI connecté |
-| `deepbridge status` | état du bridge |
-| `deepbridge doctor` | diagnostic complet de la chaîne |
-| `deepbridge api` | coordonnées et exemples pour un autre client |
-| `deepbridge serve` | lance le bridge au premier plan |
+| `deepbridge models` | list models, free and paid, with prices |
+| `deepbridge balance` | theos balance and next refill |
+| `deepbridge account` | signed-in DeepAI account |
+| `deepbridge status` | bridge state |
+| `deepbridge doctor` | full chain diagnostic |
+| `deepbridge api` | coordinates and examples for another client |
+| `deepbridge serve` | run the bridge in the foreground |
 
-## Autres clients
+## Other clients
 
-Le bridge parle les deux protocoles. `deepbridge api` affiche le token et des
-exemples prêts à copier.
+The bridge speaks both protocols; `deepbridge api` prints the token and
+ready-to-paste examples.
 
-**opencode** (`opencode.json`) :
+**opencode** (`opencode.json`):
 
 ```json
 {
@@ -85,16 +89,16 @@ exemples prêts à copier.
     "deepai": {
       "npm": "@ai-sdk/openai-compatible",
       "options": { "baseURL": "http://127.0.0.1:41200/v1", "apiKey": "<token>" },
-      "models": { "glm-5.3-flash": {} }
+      "models": { "deepseek-v4.1-flash": {} }
     }
   }
 }
 ```
 
-**Codex** (`~/.codex/config.toml`) :
+**Codex** (`~/.codex/config.toml`):
 
 ```toml
-model = "glm-5.3-flash"
+model = "deepseek-v4.1-flash"
 model_provider = "deepai"
 
 [model_providers.deepai]
@@ -104,62 +108,62 @@ env_key = "DEEPAI_BRIDGE_TOKEN"
 wire_api = "chat"
 ```
 
-**curl** :
+**curl**:
 
 ```bash
 curl http://127.0.0.1:41200/v1/chat/completions \
   -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
-  -d '{"model":"glm-5.3-flash","messages":[{"role":"user","content":"hi"}]}'
+  -d '{"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"hi"}]}'
 ```
 
-## Changer de compte
+## Switching account
 
-Le bridge n'a aucune clé à lui : il relit celle de l'app à chaque requête. Pour
-changer de compte, déconnecte-toi dans DeepAI Code et reconnecte-toi. Le bridge
-suit immédiatement.
+The bridge holds no key of its own: it re-reads the app's on every request. Sign
+out in DeepAI Code and sign back in; the bridge follows immediately.
 
-## Modèles payants
+## Paid models
 
-Ils sont autorisés par défaut. Pour les bloquer :
-
-```bash
-BRIDGE_ALLOW_PAID=0 claude
-```
-
-Ils ne sont pas bloqués quand le solde tombe à zéro : le bridge bascule alors
-seul sur un modèle gratuit, sauf si `BRIDGE_FALLBACK_ON_EMPTY=0`.
+Allowed by default. To block them: `BRIDGE_ALLOW_PAID=0 claude`. When the balance
+hits zero the bridge falls back to a free model by itself, unless
+`BRIDGE_FALLBACK_ON_EMPTY=0`.
 
 ## Configuration
 
-| Variable | Défaut | Rôle |
+| Variable | Default | Role |
 |---|---|---|
-| `BRIDGE_PORT` | `41200` | port d'écoute (loopback) |
-| `BRIDGE_DEFAULT_MODEL` | premier modèle gratuit | modèle de départ |
-| `BRIDGE_ALLOW_PAID` | `1` | autorise les modèles payants |
-| `BRIDGE_FALLBACK_ON_EMPTY` | `1` | bascule en gratuit quand le solde est à 0 |
-| `BRIDGE_NO_AUTH` | `0` | désactive le token (loopback de confiance) |
-| `BRIDGE_STAY_ALIVE` | `0` | ne s'arrête pas avec l'app |
-| `BRIDGE_VERBOSE` | `0` | journal sur stderr |
-| `DEEPAI_APP_BIN` | `~/AppImages/deepai_code.appimage` | binaire de l'app |
-| `CLAUDE_REAL_BIN` | dernier `~/.local/share/claude/versions/*` | binaire `claude` réel |
+| `BRIDGE_PORT` | `41200` | listen port (loopback) |
+| `BRIDGE_DEFAULT_MODEL` | `deepseek-v4.1-flash` | starting model |
+| `BRIDGE_ALLOW_PAID` | `1` | allow paid models |
+| `BRIDGE_FALLBACK_ON_EMPTY` | `1` | fall back to free at zero balance |
+| `BRIDGE_NO_AUTH` | `0` | disable the token (trusted loopback) |
+| `BRIDGE_STAY_ALIVE` | `0` | do not exit with the app |
+| `BRIDGE_VERBOSE` | `0` | log on stderr |
+| `DEEPAI_TRANSPORT_URL` / `DEEPAI_TRANSPORT_TOKEN` | — | bypass discovery |
+| `DEEPAI_APP_BIN` | `~/AppImages/deepai_code.appimage` | app binary |
+| `CLAUDE_REAL_BIN` | newest `~/.local/share/claude/versions/*` | real `claude` |
 
-Environnement Claude Code utile : `CLAUDE_CODE_MAX_OUTPUT_TOKENS`,
-`API_TIMEOUT_MS`.
+## Security
 
-## Sécurité
+- listens on `127.0.0.1` only;
+- random token in `~/.deepai-bridge/token` (0600), sent as
+  `authorization: Bearer` or `x-api-key`;
+- nothing leaves the machine except through the app's own transport;
+- logs in `~/.deepai-bridge/bridge.log`.
 
-- écoute sur `127.0.0.1` uniquement ;
-- token aléatoire dans `~/.deepai-bridge/token` (0600), à envoyer en
-  `authorization: Bearer` ou `x-api-key` ;
-- aucune donnée ne quitte la machine autrement que vers le transport de l'app ;
-- journaux dans `~/.deepai-bridge/bridge.log`.
+## How it works
 
-## Détails techniques
+- [docs/DESIGN.md](docs/DESIGN.md) — how the bridge reaches the app
+- [docs/MODELS.md](docs/MODELS.md) — model naming and warning suppression
+- [docs/THEOS.md](docs/THEOS.md) — how theos are granted
+- [docs/PLATFORMS.md](docs/PLATFORMS.md) — Linux, macOS, Windows, Docker
 
-- [docs/DESIGN.md](docs/DESIGN.md) — comment le bridge parle à l'app
-- [docs/MODELS.md](docs/MODELS.md) — nommage des modèles et suppression du warning
-- [docs/THEOS.md](docs/THEOS.md) — comment les théos sont attribués
+## Legal note
 
-## Licence
+Adapted from reading the DeepAI Code bundle. DeepAI's terms (section 4) forbid
+other applications from using the service without written consent and from
+working around its limits. The bridge copies nothing: it borrows the running
+app's own transport.
+
+## License
 
 MIT.

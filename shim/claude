@@ -4,8 +4,8 @@
 #
 # - ensures the DeepAI Code app is running (starts it if needed)
 # - starts the bridge, waits until it answers
-# - runs the real Claude Code with a generated settings file that keeps every
-#   user setting (hooks, theme) and adds only the bridge environment
+# - runs the real Claude Code, re-asserting the bridge settings in
+#   ~/.claude/settings.json (user hooks and theme are preserved)
 # - stops the bridge on exit, and leaves the app as it found it
 #
 # Survives Claude Code updates: the real binary is re-resolved on every run and
@@ -19,8 +19,6 @@ STATE="${HOME}/.deepai-bridge"
 PORT="${BRIDGE_PORT:-41200}"
 URL="http://127.0.0.1:${PORT}"
 APP_BIN="${DEEPAI_APP_BIN:-${HOME}/AppImages/deepai_code.appimage}"
-USER_SETTINGS="${HOME}/.claude/settings.json"
-GEN_SETTINGS="${STATE}/claude-settings.json"
 PID_FILE="${STATE}/bridge.pid"
 LOG="${STATE}/bridge.log"
 
@@ -106,58 +104,19 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # ------------------------------------------------------------------- settings
-write_settings() {
-  local bridge_token
-  bridge_token="$(cat "${STATE}/token" 2>/dev/null || true)"
-  [[ -n "$bridge_token" ]] || die "bridge token missing"
-
-  node - "$USER_SETTINGS" "$GEN_SETTINGS" "$URL" "$bridge_token" "${BRIDGE_DEFAULT_MODEL:-}" <<'NODE'
-const fs = require("node:fs");
-const [userFile, outFile, url, token, wanted] = process.argv.slice(2);
-
-let base = {};
-try { base = JSON.parse(fs.readFileSync(userFile, "utf8")); } catch {}
-if (Array.isArray(base)) base = {};
-
-const catalog = (() => {
-  try {
-    const list = JSON.parse(fs.readFileSync(`${process.env.HOME}/.deepai-code/userdata/deepai/pi/deepai/models.json`, "utf8"))
-      ?.providers?.deepai?.models ?? [];
-    const free = list.filter((m) => m.theosPerRequest === "0").map((m) => `claude-3-haiku--${m.id}`);
-    return free.length ? free : ["claude-3-haiku--glm-5.3-flash"];
-  } catch { return ["claude-3-haiku--glm-5.3-flash"]; }
-})();
-
-const pick = wanted || catalog[0];
-const env = {
-  ...(base.env || {}),
-  ANTHROPIC_BASE_URL: url,
-  ANTHROPIC_AUTH_TOKEN: token,
-  ANTHROPIC_API_KEY: "",
-  CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: "1",
-  CLAUDE_CODE_MAX_OUTPUT_TOKENS: process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS || "32768",
-  API_TIMEOUT_MS: process.env.API_TIMEOUT_MS || "600000",
-  ANTHROPIC_MODEL: pick,
-  ANTHROPIC_DEFAULT_OPUS_MODEL: pick,
-  ANTHROPIC_DEFAULT_SONNET_MODEL: pick,
-  ANTHROPIC_DEFAULT_HAIKU_MODEL: pick,
-  ANTHROPIC_DEFAULT_FABLE_MODEL: pick,
-  CLAUDE_CODE_SUBAGENT_MODEL: pick,
-  ANTHROPIC_CUSTOM_MODEL_OPTION: pick,
-  ANTHROPIC_CUSTOM_MODEL_OPTION_NAME: "DeepAI Code (bridge)",
-  ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION: "Modèles DeepAI Code, dont les gratuits",
-};
-fs.writeFileSync(outFile, JSON.stringify({ ...base, env, model: pick }, null, 2));
-NODE
-  [[ -s "$GEN_SETTINGS" ]] || die "could not write settings"
+# Settings live in ~/.claude/settings.json (written by `deepbridge install` and
+# re-asserted here), so Claude Code picks them up natively and the user's own
+# hooks stay in place.
+assert_settings() {
+  node "${ROOT}/src/settings.mjs" write >/dev/null 2>&1 || die "could not write settings"
 }
 
 if needs_bridge "$@"; then
   ensure_app
   start_bridge
-  write_settings
+  assert_settings
   # No exec: exec would replace this shell and discard the cleanup trap.
-  "$CLAUDE_BIN" --settings "$GEN_SETTINGS" "$@"
+  "$CLAUDE_BIN" "$@"
   status=$?
   cleanup
   trap - EXIT
