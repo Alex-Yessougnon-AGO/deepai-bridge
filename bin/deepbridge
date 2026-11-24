@@ -84,6 +84,8 @@ Environment=BRIDGE_PORT=${PORT}
 ExecStart=$(command -v node) ${ROOT}/src/bridge.mjs
 Restart=on-failure
 RestartSec=5
+# Ne tue que le bridge : jamais l'app, même si elle a été lancée depuis lui.
+KillMode=process
 
 [Install]
 WantedBy=default.target

@@ -62,7 +62,10 @@ présent. S'il n'y en a aucun et qu'une requête arrive, il démarre l'app et at
 jusqu'à 90 s. `BRIDGE_AUTOSTART_APP=0` désactive ce démarrage automatique ; il
 faut alors lancer l'app soi-même.
 
-**Rien dans le bridge n'arrête l'app.** Le seul `kill` du code vise le processus
+**Rien dans le bridge n'arrête l'app.** L'app démarrée par le bridge part dans
+son propre cgroup (`systemd-run --scope`), et le service tourne en
+`KillMode=process` : redémarrer ou arrêter le bridge ne ferme jamais l'app, même
+lancée depuis lui. Le seul `kill` du code vise le processus
 du bridge. Si tu fermes DeepAI Code, elle reste fermée ; les requêtes répondent
 503 jusqu'à sa réouverture (ou jusqu'au prochain démarrage automatique).
 

@@ -218,7 +218,19 @@ function startApp() {
     if (!fs.existsSync(bin)) return;
     appStarting = true;
     log("starting-app", bin);
-    spawn(bin, [], { detached: true, stdio: "ignore" }).unref();
+    // Launch outside this process's cgroup, so a restart of the bridge (or of
+    // its service) never takes the app down with it.
+    const inScope =
+      process.platform === "linux" &&
+      ["/usr/bin/systemd-run", "/bin/systemd-run"].some((p) => { try { return fs.existsSync(p); } catch { return false; } });
+    if (inScope) {
+      spawn("systemd-run", ["--user", "--scope", "--collect", "--unit=deepai-code-app", bin], {
+        detached: true,
+        stdio: "ignore",
+      }).unref();
+    } else {
+      spawn(bin, [], { detached: true, stdio: "ignore" }).unref();
+    }
     setTimeout(() => { appStarting = false; }, 60000).unref();
   } catch (e) {
     appStarting = false;
