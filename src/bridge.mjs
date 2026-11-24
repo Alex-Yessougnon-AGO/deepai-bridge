@@ -257,20 +257,35 @@ async function upstream(payload) {
         message: "DeepAI Code did not come up; open it once, then retry.",
       },
     };
-  try {
-    const res = await fetch(`${t.url}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${t.token}`,
-        ...(t.thread ? { "x-session-affinity": t.thread } : {}),
-      },
-      body: JSON.stringify(payload),
-    });
-    return { res };
-  } catch (e) {
-    return { error: { code: 502, message: `transport unreachable: ${e.message}` } };
+
+  // The transport variable appears before its HTTP port accepts connections.
+  // Retry a few times so the first request after a cold start does not fail.
+  let lastError = null;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    if (attempt) {
+      await sleep(1500);
+      const fresh = findTransport();
+      if (fresh) t = fresh;
+    }
+    try {
+      const res = await fetch(`${t.url}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${t.token}`,
+          ...(t.thread ? { "x-session-affinity": t.thread } : {}),
+        },
+        body: JSON.stringify(payload),
+      });
+      return { res };
+    } catch (e) {
+      lastError = e;
+      log("upstream-retry", `${attempt + 1}/5`, e.message);
+    }
   }
+  return {
+    error: { code: 502, message: `transport unreachable: ${lastError?.message}` },
+  };
 }
 
 // --------------------------------------------------------------- Anthropic
